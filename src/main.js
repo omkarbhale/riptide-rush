@@ -1,4 +1,5 @@
-// Boot, fixed-timestep loop, screen state machine, and the bridge from sim events to presentation.
+// Boot, fixed-timestep loop, screen state machine, and the wiring between the sim, the effects layer,
+// the sound layer and the renderer. Sim events go to feedback.js; this file only handles state changes.
 import {
   LOGICAL_WIDTH as W,
   LOGICAL_HEIGHT as H,
@@ -7,13 +8,20 @@ import {
   HIGH_SCORE_KEY,
   RESTART_GATE,
 } from './config.js';
-import { createGame, update, drainEvents, tierFor } from './game.js';
+import { createGame, update, drainEvents } from './game.js';
 import { createInput } from './input.js';
-import { drawFrame, PALETTE } from './render.js';
+import { drawFrame } from './render.js';
+import { createFx } from './fx.js';
+import { audio } from './audio.js';
+import { createFeedback } from './feedback.js';
+
+const MUTE_KEY = 'riptide-rush.muted';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const input = createInput(canvas);
+const fx = createFx();
+const feedback = createFeedback({ audio, fx });
 
 // screen: 'title' | 'playing' | 'paused' | 'over'
 const app = {
@@ -22,7 +30,7 @@ const app = {
   highScore: loadHighScore(),
   newBest: false,
   overAge: 0,
-  effects: [],
+  muted: loadMuted(),
   time: 0,
   acc: 0,
 };
@@ -48,24 +56,64 @@ function saveHighScore(value) {
   }
 }
 
+function loadMuted() {
+  try {
+    return window.localStorage.getItem(MUTE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function saveMuted(value) {
+  try {
+    window.localStorage.setItem(MUTE_KEY, value ? '1' : '0');
+  } catch {
+    // mute lasts for this page only
+  }
+}
+
+// Audio is created on the first user gesture (browsers refuse an AudioContext before one).
+// Until then audio calls are silent no-ops, so the mute state is applied again once it exists.
+function setMuted(value) {
+  app.muted = value;
+  saveMuted(value);
+  audio.setMuted(value);
+}
+
+function unlockAudio() {
+  if (!audio.init()) return;
+  audio.setMuted(app.muted);
+  window.removeEventListener('pointerdown', unlockAudio, true);
+  window.removeEventListener('keydown', unlockAudio, true);
+}
+window.addEventListener('pointerdown', unlockAudio, true);
+window.addEventListener('keydown', unlockAudio, true);
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyM' && !e.repeat) setMuted(!app.muted);
+});
+
 function startRun() {
   app.game = createGame(newSeed());
   app.screen = 'playing';
   app.newBest = false;
   app.overAge = 0;
-  app.effects = [];
+  app.acc = 0;
   input.reset();
+  feedback.startRun();
 }
 
 function pause() {
   if (app.screen !== 'playing') return;
   app.screen = 'paused';
   input.reset();
+  feedback.setPaused(true);
 }
 
 function resume() {
   app.screen = 'playing';
   input.reset();
+  feedback.setPaused(false);
 }
 
 function endRun(score) {
@@ -106,71 +154,24 @@ function pumpInput(stepDt) {
   if (app.screen === 'over') app.overAge += stepDt;
 }
 
-function addEffect(fx) {
-  app.effects.push({ age: 0, ...fx });
-}
-
-// Maps sim events to presentation effects and to the few state changes the sim forces.
-function handleEvent(ev) {
-  switch (ev.type) {
-    case 'dash':
-      input.consume('dash');
-      addEffect({ kind: 'dash', x: ev.x, y: ev.y, angle: ev.angle, life: 0.22 });
-      break;
-    case 'pulse':
-      input.consume('pulse');
-      addEffect({ kind: 'pulse', x: ev.x, y: ev.y, life: 0.3, perfect: false });
-      break;
-    case 'perfectPulse': {
-      const pulse = [...app.effects].reverse().find((fx) => fx.kind === 'pulse');
-      if (pulse) pulse.perfect = true;
-      addEffect({ kind: 'float', x: ev.x, y: ev.y, text: 'PERFECT PULSE', color: PALETTE.gold, life: 0.9, size: 26 });
-      break;
-    }
-    case 'reflect':
-      addEffect({ kind: 'reflect', x: ev.x, y: ev.y, life: 0.25 });
-      break;
-    case 'kill': {
-      const color = PALETTE.tiers[tierFor(ev.combo)];
-      addEffect({ kind: 'kill', x: ev.x, y: ev.y, life: 0.25, color });
-      addEffect({ kind: 'float', x: ev.x, y: ev.y, text: `+${ev.points}`, color, life: 0.7 });
-      break;
-    }
-    case 'comboTier':
-      if (ev.tier > 0) {
-        addEffect({ kind: 'float', x: app.game.player.x, y: app.game.player.y - 30, text: `COMBO TIER ${ev.tier}`, color: PALETTE.tiers[ev.tier], life: 0.9 });
-      }
-      break;
-    case 'comboLost':
-      addEffect({ kind: 'float', x: app.game.player.x, y: app.game.player.y - 30, text: 'COMBO LOST', color: PALETTE.danger, life: 0.8 });
-      break;
-    case 'hurt':
-      addEffect({ kind: 'hurt', life: 0.5 });
-      break;
-    case 'waveStart':
-      addEffect({ kind: 'float', x: W / 2, y: H / 2 - 120, text: `WAVE ${ev.wave}`, color: PALETTE.player, life: 1.4, size: 40 });
-      break;
-    case 'gameOver':
-      endRun(ev.score);
-      break;
-    default:
-      break;
-  }
-}
-
+// One simulation step. Presses that arrive while the sim is held (hit-stop) stay queued in the input
+// layer until the next step, so nothing is dropped.
 function simStep() {
   pumpInput(SIM_DT);
   if (app.screen !== 'playing') return;
   update(app.game, input.snapshot(), SIM_DT);
-  for (const ev of drainEvents(app.game)) handleEvent(ev);
+  const events = drainEvents(app.game);
+  for (const ev of events) {
+    // A dash or pulse has fired: clear its buffered press so it cannot fire twice.
+    if (ev.type === 'dash') input.consume('dash');
+    else if (ev.type === 'pulse') input.consume('pulse');
+    else if (ev.type === 'gameOver') endRun(ev.score);
+  }
+  feedback.handleStep(events, app.game);
 }
 
-function updateEffects(dt) {
-  for (const fx of app.effects) fx.age += dt;
-  app.effects = app.effects.filter((fx) => fx.age < fx.life);
-}
-
-// Fixed 120 Hz simulation; render runs once per animation frame with interpolation alpha.
+// Fixed 120 Hz simulation, advanced by the effects time scale: hit-stop holds it still, slow-mo
+// slows it. Effects, floaters and the renderer keep running on real time.
 let last = performance.now();
 function frame(now) {
   let dt = (now - last) / 1000;
@@ -179,28 +180,34 @@ function frame(now) {
   if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
   app.time += dt;
 
-  if (app.screen === 'playing' || app.screen === 'over') {
-    app.acc += dt;
+  const live = app.screen === 'playing' || app.screen === 'over';
+  if (live) {
+    const scale = fx.update(dt);
+    app.acc += dt * scale;
     while (app.acc >= SIM_DT) {
       simStep();
       app.acc -= SIM_DT;
     }
   } else {
-    // Menus and pause: no simulation, but keep reading input once per frame.
+    // Menus and pause: the world and its effects freeze, but input is still read once per frame.
+    fx.update(0);
     app.acc = 0;
     pumpInput(dt);
   }
-  if (app.screen === 'playing' || app.screen === 'over') updateEffects(dt);
+  feedback.frame(live ? dt : 0, app.game);
 
   drawFrame(ctx, {
     screen: app.screen,
     game: app.game,
     alpha: app.acc / SIM_DT,
     time: app.time,
+    dt: live ? dt : 0,
     highScore: app.highScore,
     newBest: app.newBest,
     overAge: app.overAge,
-    effects: app.effects,
+    muted: app.muted,
+    fx,
+    rings: feedback.rings,
   });
   requestAnimationFrame(frame);
 }
