@@ -21,12 +21,12 @@ import {
   segmentHitsCircle,
   multiplierFor,
   comboWindowFor,
+  hitStopFor,
   tierFor,
-  spawnIntervalFor,
-  kindWeights,
   mulberry32,
   ENEMY_KINDS,
 } from '../src/game.js';
+import { SCRIPTED_KINDS } from '../src/waves.js';
 import { createActionBuffer } from '../src/input.js';
 
 const NONE = { moveX: 0, moveY: 0, aimX: W / 2, aimY: H / 2, dash: false, pulse: false };
@@ -51,6 +51,19 @@ function steps(g, n, input = NONE) {
 function seconds(g, s, input = NONE) {
   steps(g, Math.round(s / SIM_DT), input);
 }
+
+// Runs `n` steps and returns every event they produced, in order.
+function run(g, n, input = NONE) {
+  const events = [];
+  for (let i = 0; i < n; i++) {
+    update(g, input, SIM_DT);
+    events.push(...drainEvents(g));
+  }
+  return events;
+}
+
+const collect = (g, s, input = NONE) => run(g, Math.round(s / SIM_DT), input);
+const kindOf = (events, type) => events.filter((ev) => ev.type === type);
 
 function addBullet(g, x, y, vx, vy) {
   g.bullets.push({ id: g.nextId++, owner: 'enemy', x, y, px: x, py: y, vx, vy, r: 6, life: 4, alive: true });
@@ -142,10 +155,14 @@ test('multiplier is 1 + floor(combo / 5), capped at x10', () => {
   assert.equal(multiplierFor(999), COMBO.multiplierCap);
 });
 
-test('combo timer starts at 2.5 s, shrinks with combo, and never drops below 1.6 s', () => {
+test('combo timer is 2.5 s at x1, shrinks linearly with the multiplier, and floors at 1.6 s at x10', () => {
   assert.equal(comboWindowFor(0), COMBO.window);
+  assert.equal(comboWindowFor(4), COMBO.window, 'still x1');
   assert.ok(comboWindowFor(10) < comboWindowFor(1));
-  assert.equal(comboWindowFor(500), COMBO.windowMin);
+  // x2 is one ninth of the way from 2.5 to 1.6 s.
+  assertNear(comboWindowFor(5), COMBO.window - (COMBO.window - COMBO.windowMin) / 9, 1e-9, 'x2 step');
+  assert.equal(comboWindowFor(45), COMBO.windowMin, 'x10 reaches the floor');
+  assert.equal(comboWindowFor(500), COMBO.windowMin, 'the floor holds above x10');
 });
 
 test('combo tiers step up at the configured counts', () => {
@@ -166,7 +183,7 @@ test('kill score is base x multiplier of the combo after the kill', () => {
   assert.equal(g.combo.tier, 1, 'five kills reach colour tier 1');
 });
 
-test('a multi-kill bonus applies to the second and later kills in one slash', () => {
+test('a multi-kill bonus applies to the second and later kills in one slash, and the kill event carries it', () => {
   const g = quiet();
   for (let i = 0; i < 5; i++) killEnemy(g, spawnEnemy(g, 'drifter', 100 + i * 50, 100), 1);
   drainEvents(g);
@@ -175,8 +192,17 @@ test('a multi-kill bonus applies to the second and later kills in one slash', ()
   assert.equal(g.score, 60 + 70);
   const kill = drainEvents(g).find((ev) => ev.type === 'kill');
   assert.equal(kill.points, 70);
+  assert.equal(kill.bonus, 50);
   assert.equal(kill.multi, 2);
   assert.equal(kill.combo, 6);
+  assert.equal(kill.hitStopMs, hitStopFor(2));
+});
+
+test('hit-stop is 40 ms for one kill, +10 ms per extra kill in a slash, capped at 100 ms', () => {
+  assert.equal(hitStopFor(1), 40);
+  assert.equal(hitStopFor(2), 50);
+  assert.equal(hitStopFor(4), 70);
+  assert.equal(hitStopFor(20), 100);
 });
 
 test('combo expires after its timer, dropping to 0 with a comboLost event', () => {
@@ -282,7 +308,7 @@ test('reflected bullets kill the enemy they hit; the pulse also staggers nearby 
   steps(g, 60);
   assert.equal(spitter.alive, false, 'reflected bullet killed the spitter');
   assert.equal(g.kills, 1);
-  assert.ok(drainEvents(g).some((ev) => ev.type === 'kill' && ev.enemyType === 'spitter'));
+  assert.ok(drainEvents(g).some((ev) => ev.type === 'kill' && ev.enemyType === 'spitter' && ev.cause === 'reflect'));
 });
 
 test('spitter fires aimed bullets at the player on its interval', () => {
@@ -310,45 +336,267 @@ test('charger telegraphs for 0.6 s, then lunges in a straight line', () => {
   assertNear(e.dirX, -1, 1e-9, 'lunge direction is locked toward the player');
 });
 
-test('wave escalation: spawn interval shrinks, new kinds unlock, wave counter advances', () => {
-  assert.deepEqual(Object.keys(kindWeights(1)), ['drifter']);
-  assert.ok(Object.keys(kindWeights(2)).includes('spitter'));
-  assert.ok(!Object.keys(kindWeights(2)).includes('charger'));
-  assert.ok(Object.keys(kindWeights(3)).includes('charger'));
+// ---- Shellback -----------------------------------------------------------------------------
 
-  let prev = Infinity;
-  for (let wave = 1; wave <= 30; wave++) {
-    const interval = spawnIntervalFor(wave);
-    assert.ok(interval <= prev, `interval does not grow at wave ${wave}`);
-    assert.ok(interval >= SPAWN.minInterval);
-    prev = interval;
-  }
-  assert.equal(spawnIntervalFor(30), SPAWN.minInterval);
+// Places a shellback and sets its facing explicitly (spawning aims it at the player).
+function shellbackAt(g, x, y, facing) {
+  const e = spawnEnemy(g, 'shellback', x, y);
+  e.facing = facing;
+  return e;
+}
 
+const wrap = (a) => a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+
+test('a dash into the shellback front arc deflects: no kill, no damage, Rip bounces back, the charge is spent', () => {
   const g = quiet();
-  g.wave.timer = 0.001;
-  steps(g, 2);
-  assert.equal(g.wave.number, 2);
-  assert.ok(drainEvents(g).some((ev) => ev.type === 'waveStart' && ev.wave === 2));
+  place(g, 600, H / 2); // in front of it (facing 0 is +x)
+  const e = shellbackAt(g, 400, H / 2, 0);
+  update(g, dashAt(100, H / 2), SIM_DT);
+  const events = [...drainEvents(g), ...run(g, 40)];
+
+  assert.ok(kindOf(events, 'deflect').length === 1, 'one deflect event');
+  assert.equal(e.alive, true, 'the shellback survives');
+  assert.equal(g.kills, 0);
+  assert.equal(g.player.hp, PLAYER.maxHp, 'no damage from the bounce');
+  assert.equal(g.player.dash.charges, 2, 'the dash spent its charge and got no refund');
+  assert.equal(g.player.dash.active, null, 'the dash was cancelled');
+  const gap = Math.hypot(g.player.x - e.x, g.player.y - e.y);
+  assert.ok(gap > e.r + PLAYER.radius, 'Rip ends outside the armour');
+  assert.ok(g.player.x > 600 - DASH.distance, 'Rip is pushed back, not through');
 });
 
-test('wave 1 spawns only drifters, from the arena edge and away from the player', () => {
-  const g = createGame(7);
+test('a dash into the shellback from its side or behind kills it', () => {
+  const behind = quiet();
+  place(behind, 200, H / 2); // behind it (facing 0 is +x)
+  shellbackAt(behind, 400, H / 2, 0);
+  update(behind, dashAt(900, H / 2), SIM_DT);
+  const eventsBehind = run(behind, 20);
+  assert.equal(behind.kills, 1, 'from behind: killed');
+  assert.ok(kindOf(eventsBehind, 'kill').some((ev) => ev.enemyType === 'shellback'));
+  assert.equal(kindOf(eventsBehind, 'deflect').length, 0);
+
+  const side = quiet();
+  place(side, 400, 600); // below it, dashing up through its centre
+  shellbackAt(side, 400, H / 2, 0);
+  update(side, dashAt(400, 100), SIM_DT);
+  run(side, 20);
+  assert.equal(side.kills, 1, 'from the side: killed');
+});
+
+test('a pulse drops the armour for 1.5 s and emits stagger, then any dash kills it', () => {
+  const g = quiet();
+  place(g, 480, H / 2);
+  const e = shellbackAt(g, 400, H / 2, 0);
+  const events = collect(g, 0.02, pulseInput);
+  assert.ok(kindOf(events, 'stagger').length === 1, 'stagger event');
+  assert.ok(e.stagger > ENEMY.shellback.staggerTime - 0.05, 'stagger state is exposed on the enemy');
+
+  // Front contact while staggered: the armour is down, so the dash kills.
+  place(g, 600, H / 2);
+  update(g, dashAt(100, H / 2), SIM_DT);
+  const after = run(g, 20);
+  assert.equal(g.kills, 1, 'the dash killed it while staggered');
+  assert.equal(kindOf(after, 'deflect').length, 0);
+  assert.ok(kindOf(after, 'kill').some((ev) => ev.enemyType === 'shellback'));
+});
+
+test('a shellback turns toward Rip slowly, at most its turn rate, so flanking is possible', () => {
+  const g = quiet();
+  place(g, 600, H / 2);
+  const e = shellbackAt(g, 400, H / 2, Math.PI / 2);
+  const start = e.facing;
+  seconds(g, 0.2);
+  const turned = Math.abs(wrap(e.facing - start));
+  assert.ok(turned > 0.1, 'it turns');
+  assert.ok(turned <= ENEMY.shellback.turnRate * 0.2 + 1e-6, `turned ${turned} rad in 0.2 s`);
+});
+
+// ---- Splitter and mini -----------------------------------------------------------------------
+
+test('a splitter dies into three minis, each with spawn grace', () => {
+  const g = quiet();
+  place(g, 400, H / 2);
+  spawnEnemy(g, 'splitter', 600, H / 2);
+  update(g, dashAt(900, H / 2), SIM_DT);
+  for (let i = 0; i < 40 && g.kills === 0; i++) update(g, NONE, SIM_DT);
+  assert.equal(g.kills, 1, 'the dash killed the splitter');
+  const minis = g.enemies.filter((e) => e.kind === 'mini');
+  assert.equal(minis.length, 3, 'three minis');
+  assert.ok(minis.every((m) => m.grace > 0), 'every mini is in spawn grace');
+  assert.ok(minis.every((m) => m.alive));
+});
+
+test('a mini cannot hurt Rip during its spawn grace, and a landed contact removes it', () => {
+  const g = quiet();
+  place(g, 900, 100);
+  const m = spawnEnemy(g, 'mini', 900, 100);
+  steps(g, 1);
+  assert.equal(g.player.hp, PLAYER.maxHp, 'no damage during grace');
+  assert.equal(m.alive, true);
+
+  seconds(g, ENEMY.mini.graceTime + 0.05);
+  assert.equal(m.alive, false, 'after grace the mini hits Rip, then is removed');
+  assert.equal(g.player.hp, PLAYER.maxHp - 1);
+});
+
+test('a mini fades after its lifetime with no score and no combo', () => {
+  const g = quiet();
+  // Far enough that the mini cannot reach Rip (1288 px at 200 px/s takes longer than its 6 s life),
+  // so this is the lifetime path and not a contact.
+  place(g, 40, 40);
+  const m = spawnEnemy(g, 'mini', 1200, 600);
+  const events = collect(g, ENEMY.mini.lifetime + 0.1);
+  assert.equal(m.alive, false);
+  assert.equal(g.score, 0);
+  assert.equal(g.combo.count, 0);
+  assert.equal(g.player.hp, PLAYER.maxHp, 'it faded; it did not hit Rip');
+  assert.equal(kindOf(events, 'kill').length, 0);
+});
+
+// ---- Mine ------------------------------------------------------------------------------------
+
+test('a mine arms when Rip comes within 130 px, and detonates 0.8 s later', () => {
+  const g = quiet();
+  place(g, 400, H / 2);
+  const m = spawnEnemy(g, 'mine', 640, H / 2); // 240 px away: idle
+  seconds(g, 0.2);
+  assert.equal(m.state, 'idle');
+
+  place(g, 520, H / 2); // 120 px: arms
+  const armed = run(g, 1);
+  assert.equal(kindOf(armed, 'mineArm').length, 1, 'arm event');
+  assert.equal(m.state, 'armed');
+
+  const early = collect(g, 0.75);
+  assert.equal(kindOf(early, 'mineExplode').length, 0, 'not yet');
+  const late = collect(g, 0.1);
+  assert.equal(kindOf(late, 'mineExplode').length, 1, 'detonated after the fuse');
+  assert.equal(m.alive, false);
+  assert.equal(g.player.hp, PLAYER.maxHp, 'Rip is outside the 90 px blast');
+});
+
+test('a mine blast hurts Rip when Rip is inside it', () => {
+  const g = quiet();
+  place(g, 600, H / 2);
+  spawnEnemy(g, 'mine', 630, H / 2); // 30 px away: armed and inside the blast
+  const events = collect(g, 0.9);
+  assert.equal(kindOf(events, 'mineExplode').length, 1);
+  assert.equal(g.player.hp, PLAYER.maxHp - 1);
+});
+
+test('dashing through a mine defuses it: bonus score, a kill for combo, and a charge refund', () => {
+  const g = quiet();
+  place(g, 300, H / 2);
+  const m = spawnEnemy(g, 'mine', 420, H / 2);
+  update(g, dashAt(900, H / 2), SIM_DT);
+  assert.equal(g.player.dash.charges, 2);
+  const events = [...drainEvents(g), ...collect(g, 0.3)];
+
+  const kill = kindOf(events, 'kill')[0];
+  assert.ok(kill, 'defusing counts as a kill');
+  assert.equal(kill.enemyType, 'mine');
+  assert.equal(kill.cause, 'defuse');
+  assert.equal(g.score, ENEMY.mine.points, 'bonus score at x1');
+  assert.equal(g.combo.count, 1);
+  assert.equal(g.player.dash.charges, 3, 'the kill refunded the charge');
+  assert.equal(kindOf(events, 'mineExplode').length, 0, 'a defused mine does not detonate');
+  assert.equal(m.alive, false);
+});
+
+test('a mine blast kills the other enemies inside it, and those kills count for score and combo', () => {
+  const g = quiet();
+  place(g, 520, H / 2); // 120 px from the mine: armed, and outside the blast
+  spawnEnemy(g, 'mine', 640, H / 2);
+  spawnEnemy(g, 'drifter', 700, H / 2); // 60 px from the mine: inside the blast
+  const events = collect(g, 0.9);
+  const kill = kindOf(events, 'kill').find((ev) => ev.enemyType === 'drifter');
+  assert.ok(kill, 'the drifter was killed by the blast');
+  assert.equal(kill.cause, 'blast');
+  assert.equal(g.kills, 1);
+  assert.equal(g.score, ENEMY.drifter.points, 'the chain kill scores like any kill at x1');
+  assert.equal(g.combo.count, 1);
+  assert.equal(g.player.hp, PLAYER.maxHp, 'Rip was outside the blast');
+});
+
+test('a splitter killed by a blast still splits', () => {
+  const g = quiet();
+  place(g, 520, H / 2);
+  spawnEnemy(g, 'mine', 640, H / 2);
+  spawnEnemy(g, 'splitter', 690, H / 2);
+  collect(g, 0.9);
+  assert.equal(g.enemies.filter((e) => e.kind === 'mini').length, 3);
+});
+
+// ---- Waves -----------------------------------------------------------------------------------
+
+test('the first 30 s are Drifters only, even for a wave whose script has other kinds', () => {
+  const g = createGame(7, { startWave: 8 }); // wave 8 has spitters and shellbacks in the script
   place(g, W / 2, H / 2);
-  const seen = [];
+  const seen = new Set();
   for (let i = 0; i < 6 * 120; i++) {
     update(g, NONE, SIM_DT);
-    for (const wn of g.warnings) seen.push(wn);
-    for (const e of g.enemies) seen.push(e);
+    for (const wn of g.warnings) seen.add(wn.kind);
+    for (const e of g.enemies) seen.add(e.kind);
   }
-  assert.ok(seen.length > 0, 'something spawned');
-  for (const s of seen) {
-    assert.equal(s.kind, 'drifter');
+  assert.ok(seen.size > 0, 'something spawned');
+  assert.deepEqual([...seen], ['drifter']);
+});
+
+test('after 30 s the script’s kinds appear, and warnings sit on the arena edge', () => {
+  const g = createGame(7, { startWave: 8 });
+  g.time = SPAWN.drifterOnlyUntil;
+  place(g, W / 2, H / 2);
+  const seen = new Set();
+  for (let i = 0; i < 2 * 120; i++) {
+    update(g, NONE, SIM_DT);
+    for (const wn of g.warnings) {
+      seen.add(wn.kind);
+      const edge = wn.x <= 41 || wn.x >= W - 41 || wn.y <= 41 || wn.y >= H - 41;
+      assert.ok(edge, 'warning marker sits on the arena edge');
+    }
   }
-  for (const wn of g.warnings) {
-    const edge = wn.x <= 41 || wn.x >= W - 41 || wn.y <= 41 || wn.y >= H - 41;
-    assert.ok(edge, 'warning marker sits on the arena edge');
+  assert.ok(seen.has('spitter') && seen.has('shellback'), `kinds seen: ${[...seen]}`);
+});
+
+test('a wave clears once its queue is empty and its enemies are dead, then a breather, then the next wave', () => {
+  const g = createGame(5);
+  g.wave.queue = [];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  const d = spawnEnemy(g, 'drifter', 200, 200);
+  assert.equal(kindOf(collect(g, 0.1), 'waveClear').length, 0, 'not clear while an enemy lives');
+  killEnemy(g, d, 1);
+  const cleared = kindOf(collect(g, 0.05), 'waveClear');
+  assert.deepEqual(cleared.map((ev) => ev.wave), [1]);
+  assert.equal(g.wave.phase, 'breather');
+
+  const next = collect(g, SPAWN.breather + 0.05);
+  assert.ok(next.some((ev) => ev.type === 'waveStart' && ev.wave === 2), 'wave 2 starts after the breather');
+  assert.equal(g.wave.number, 2);
+  assert.equal(g.wave.phase, 'active');
+  assert.ok(g.wave.queue.length > 0, 'wave 2 has a spawn queue');
+});
+
+test('the wave script waits while the entity cap is full, then carries on', () => {
+  const g = createGame(9);
+  for (let i = 0; i < SPAWN.maxEntities; i++) addBullet(g, 40, 40, 0, 0);
+  collect(g, 1);
+  assert.equal(g.warnings.length, 0, 'nothing spawns at the cap');
+  assert.equal(g.enemies.length, 0);
+
+  g.bullets.length = 0;
+  collect(g, 0.2);
+  assert.ok(g.warnings.length + g.enemies.length > 0, 'spawning resumes once there is room');
+});
+
+test('every enemy kind is data plus behaviour and has the fields the sim needs', () => {
+  for (const [kind, def] of Object.entries(ENEMY_KINDS)) {
+    assert.equal(typeof def.radius, 'number', `${kind}.radius`);
+    assert.equal(typeof def.points, 'number', `${kind}.points`);
+    assert.equal(typeof def.init, 'function', `${kind}.init`);
+    assert.equal(typeof def.think, 'function', `${kind}.think`);
   }
+  for (const kind of SCRIPTED_KINDS) assert.ok(ENEMY_KINDS[kind], `${kind} is in the sim`);
 });
 
 test('input buffer keeps a dash press armed for 120 ms of sim time, then consumes it once', () => {
@@ -365,17 +613,6 @@ test('input buffer keeps a dash press armed for 120 ms of sim time, then consume
   assert.equal(buffer.consume('dash'), false, 'a press is consumed once');
 });
 
-test('every enemy kind is data plus behaviour and has the fields the spawner and sim need', () => {
-  for (const [kind, def] of Object.entries(ENEMY_KINDS)) {
-    assert.equal(typeof def.radius, 'number', `${kind}.radius`);
-    assert.equal(typeof def.points, 'number', `${kind}.points`);
-    assert.equal(typeof def.minWave, 'number', `${kind}.minWave`);
-    assert.equal(typeof def.weight, 'number', `${kind}.weight`);
-    assert.equal(typeof def.init, 'function', `${kind}.init`);
-    assert.equal(typeof def.think, 'function', `${kind}.think`);
-  }
-});
-
 test('same seed and same inputs give identical state', () => {
   const randomInput = (r) => ({
     moveX: [-1, 0, 1][Math.floor(r() * 3)],
@@ -385,7 +622,7 @@ test('same seed and same inputs give identical state', () => {
     dash: r() < 1 / 40,
     pulse: r() < 1 / 120,
   });
-  const run = () => {
+  const runOnce = () => {
     const g = createGame(42);
     const r = mulberry32(43);
     for (let i = 0; i < 1200; i++) update(g, randomInput(r), SIM_DT);
@@ -396,25 +633,68 @@ test('same seed and same inputs give identical state', () => {
       bullets: g.bullets.map((b) => [b.x, b.y]),
     });
   };
-  assert.equal(run(), run());
+  assert.equal(runOnce(), runOnce());
 });
 
-test('60 simulated seconds of scripted random input: no NaN positions, no exceptions', () => {
-  const r = mulberry32(999);
-  const KNOWN = new Set([
-    'kill', 'dash', 'hurt', 'pulse', 'reflect', 'perfectPulse', 'comboTier', 'comboLost', 'waveStart', 'gameOver',
-  ]);
-  const finite = (g) => {
-    const p = g.player;
-    const vals = [p.x, p.y, p.vx, p.vy, g.score, g.combo.timer, p.dash.charges];
-    for (const e of g.enemies) vals.push(e.x, e.y, e.vx, e.vy);
-    for (const b of g.bullets) vals.push(b.x, b.y, b.vx, b.vy);
-    return vals.every((v) => Number.isFinite(v));
-  };
+const KNOWN = new Set([
+  'kill', 'dash', 'hurt', 'pulse', 'reflect', 'perfectPulse', 'comboTier', 'comboLost', 'waveStart', 'waveClear',
+  'gameOver', 'deflect', 'stagger', 'mineArm', 'mineExplode',
+]);
 
+const finite = (g) => {
+  const p = g.player;
+  const vals = [p.x, p.y, p.vx, p.vy, g.score, g.combo.timer, p.dash.charges];
+  for (const e of g.enemies) vals.push(e.x, e.y, e.vx, e.vy, e.facing, e.stagger, e.grace);
+  for (const b of g.bullets) vals.push(b.x, b.y, b.vx, b.vy);
+  return vals.every((v) => Number.isFinite(v));
+};
+
+// A game that starts at `startWave` past the Drifter-only opening, so the script's own kinds can spawn.
+function fresh(seed, startWave) {
+  const g = createGame(seed, { startWave });
+  g.time = SPAWN.drifterOnlyUntil;
+  return g;
+}
+
+// Random scripted input for `seconds` of sim time from a start wave. Returns what it saw.
+function soak(seed, startWave, secondsOfSim) {
+  const r = mulberry32(seed + 1000 * startWave);
+  let g = fresh(seed, startWave);
+  const kinds = new Set();
+  let kills = 0;
+  let clears = 0;
+  const total = Math.round(secondsOfSim / SIM_DT);
+  for (let i = 0; i < total; i++) {
+    const input = {
+      moveX: [-1, 0, 1][Math.floor(r() * 3)],
+      moveY: [-1, 0, 1][Math.floor(r() * 3)],
+      aimX: r() * W,
+      aimY: r() * H,
+      dash: r() < 1 / 40,
+      pulse: r() < 1 / 120,
+    };
+    update(g, input, SIM_DT);
+    for (const ev of drainEvents(g)) {
+      assert.ok(KNOWN.has(ev.type), `unknown event ${ev.type}`);
+      if (ev.type === 'kill') kills += 1;
+      if (ev.type === 'waveClear') clears += 1;
+    }
+    for (const e of g.enemies) kinds.add(e.kind);
+    for (const wn of g.warnings) kinds.add(wn.kind);
+    assert.ok(finite(g), `non-finite state at step ${i} (start wave ${startWave})`);
+    assert.ok(g.enemies.length + g.warnings.length + g.bullets.length <= SPAWN.maxEntities, 'entity cap holds');
+    if (g.over) g = fresh(seed + i, startWave); // instant restart, as the game does
+  }
+  return { kinds, kills, clears };
+}
+
+test('60 simulated seconds of scripted random input from wave 1: no NaN, no exceptions, waves advance', () => {
+  const r = mulberry32(999);
   let g = createGame(12345);
   let deaths = 0;
   let kills = 0;
+  let furthestWave = 1;
+  let clears = 0;
   const total = Math.round(60 / SIM_DT);
   for (let i = 0; i < total; i++) {
     const input = {
@@ -429,6 +709,8 @@ test('60 simulated seconds of scripted random input: no NaN positions, no except
     for (const ev of drainEvents(g)) {
       assert.ok(KNOWN.has(ev.type), `unknown event ${ev.type}`);
       if (ev.type === 'kill') kills += 1;
+      if (ev.type === 'waveClear') clears += 1;
+      if (ev.type === 'waveStart') furthestWave = Math.max(furthestWave, ev.wave);
     }
     assert.ok(finite(g), `non-finite state at step ${i}`);
     if (g.over) {
@@ -437,6 +719,25 @@ test('60 simulated seconds of scripted random input: no NaN positions, no except
     }
   }
   assert.ok(kills > 0, 'the soak should kill something');
+  assert.ok(clears >= 1 && furthestWave >= 2, `waves advanced: cleared ${clears}, furthest wave ${furthestWave}`);
   assert.ok(deaths >= 0);
 });
 
+test('60 simulated seconds from the script’s waves cover every enemy kind with no NaN and no exceptions', () => {
+  // Waves 1 (drifters), 8 (spitters, shellbacks), and 19 (chargers, splitters, mines) between them
+  // script every kind. Each soak restarts at its own start wave after a death.
+  const seen = new Set();
+  let kills = 0;
+  for (const startWave of [1, 8, 19]) {
+    const result = soak(31 + startWave, startWave, 60);
+    result.kinds.forEach((k) => seen.add(k));
+    kills += result.kills;
+  }
+  assert.ok(kills > 0, 'the soaks should kill something');
+  for (const kind of SCRIPTED_KINDS) assert.ok(seen.has(kind), `soak reached ${kind}`);
+});
+
+test('the wave script runs to wave 50 with no NaN and no exceptions', () => {
+  const result = soak(77, 50, 20);
+  assert.ok(result.kinds.size > 0, 'wave 50 spawns enemies');
+});
