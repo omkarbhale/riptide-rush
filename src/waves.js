@@ -3,44 +3,54 @@
 // Only the kinds that exist in the simulation are scripted: drifter, spitter, charger, shellback,
 // splitter, mine. The design's puffer, shield bearer, lobber, eel and boss rows are dropped, so some
 // waves are smaller than the design table. Splitter minis are not scripted; the splitter makes them.
+//
+// A wave is released as schools (#97). A school is one spawn: Drifters come in schools of 4-8 that
+// swim in a formation (line, wedge or ring), and every other kind comes alone (a school of one).
+// `cadence` is the seconds between one school's release and the next.
+
+import { SPAWN } from './config.js';
 
 export const SCRIPTED_KINDS = ['drifter', 'spitter', 'charger', 'shellback', 'splitter', 'mine'];
 
 export const LAST_TABLE_WAVE = 20;
 
 // One row per wave 1-20. `release` marks the design's release waves (3, 5, 9, 11, 15, 18).
-// `cadence` is the seconds between spawn groups. Counts are the number of enemies of each kind.
+// Counts are the number of enemies of each kind.
 export const WAVE_TABLE = [
-  { wave: 1, intensity: 1, release: false, cadence: 3.0, counts: { drifter: 10 } },
-  { wave: 2, intensity: 2, release: false, cadence: 2.5, counts: { drifter: 14, spitter: 1 } },
-  { wave: 3, intensity: 2, release: true, cadence: 1.8, counts: { drifter: 12 } },
-  { wave: 4, intensity: 4, release: false, cadence: 2.2, counts: { drifter: 10, spitter: 2, charger: 1 } },
-  { wave: 5, intensity: 3, release: true, cadence: 2.5, counts: { drifter: 12, splitter: 2 } },
-  { wave: 6, intensity: 5, release: false, cadence: 2.0, counts: { drifter: 14, charger: 2 } },
-  { wave: 7, intensity: 4, release: false, cadence: 2.0, counts: { drifter: 16, mine: 3 } },
-  { wave: 8, intensity: 6, release: false, cadence: 2.0, counts: { drifter: 12, spitter: 2, shellback: 2 } },
-  { wave: 9, intensity: 5, release: true, cadence: 1.6, counts: { drifter: 18 } },
-  { wave: 10, intensity: 8, release: false, cadence: 2.0, counts: { drifter: 12, splitter: 2 } },
-  { wave: 11, intensity: 3, release: true, cadence: 1.8, counts: { drifter: 16, spitter: 2 } },
-  { wave: 12, intensity: 6, release: false, cadence: 1.8, counts: { drifter: 12 } },
-  { wave: 13, intensity: 6, release: false, cadence: 2.0, counts: { drifter: 8, shellback: 1 } },
-  { wave: 14, intensity: 7, release: false, cadence: 2.0, counts: { charger: 2 } },
-  { wave: 15, intensity: 4, release: true, cadence: 1.4, counts: { drifter: 20 } },
-  { wave: 16, intensity: 7, release: false, cadence: 2.0, counts: { splitter: 2, mine: 4 } },
-  { wave: 17, intensity: 8, release: false, cadence: 1.8, counts: { charger: 3, shellback: 2 } },
-  { wave: 18, intensity: 5, release: true, cadence: 1.4, counts: { drifter: 22, spitter: 2 } },
-  { wave: 19, intensity: 9, release: false, cadence: 1.6, counts: { charger: 3, splitter: 3, mine: 4 } },
-  { wave: 20, intensity: 10, release: false, cadence: 1.5, counts: { drifter: 12, spitter: 2, charger: 2, shellback: 2 } },
+  { wave: 1, intensity: 1, release: false, cadence: 0.70, counts: { drifter: 16 } },
+  { wave: 2, intensity: 2, release: false, cadence: 0.65, counts: { drifter: 20, spitter: 1 } },
+  { wave: 3, intensity: 2, release: true, cadence: 0.60, counts: { drifter: 20 } },
+  { wave: 4, intensity: 4, release: false, cadence: 0.65, counts: { drifter: 20, spitter: 2, charger: 1 } },
+  { wave: 5, intensity: 3, release: true, cadence: 0.65, counts: { drifter: 20, splitter: 2 } },
+  { wave: 6, intensity: 5, release: false, cadence: 0.60, counts: { drifter: 24, charger: 2 } },
+  { wave: 7, intensity: 4, release: false, cadence: 0.60, counts: { drifter: 28, mine: 3 } },
+  { wave: 8, intensity: 6, release: false, cadence: 0.60, counts: { drifter: 24, spitter: 2, shellback: 2 } },
+  { wave: 9, intensity: 5, release: true, cadence: 0.50, counts: { drifter: 32 } },
+  { wave: 10, intensity: 8, release: false, cadence: 0.60, counts: { drifter: 24, splitter: 2, shellback: 2 } },
+  { wave: 11, intensity: 3, release: true, cadence: 0.55, counts: { drifter: 24, spitter: 2, charger: 2 } },
+  { wave: 12, intensity: 6, release: false, cadence: 0.50, counts: { drifter: 20, shellback: 1 } },
+  { wave: 13, intensity: 6, release: false, cadence: 0.60, counts: { drifter: 16, shellback: 2, spitter: 1 } },
+  { wave: 14, intensity: 7, release: false, cadence: 0.55, counts: { drifter: 8, charger: 4 } }, // #88: was two chargers
+  { wave: 15, intensity: 4, release: true, cadence: 0.50, counts: { drifter: 28, shellback: 2 } },
+  { wave: 16, intensity: 7, release: false, cadence: 0.60, counts: { splitter: 2, mine: 4, spitter: 1 } },
+  { wave: 17, intensity: 8, release: false, cadence: 0.55, counts: { drifter: 8, charger: 4, shellback: 4 } },
+  { wave: 18, intensity: 5, release: true, cadence: 0.50, counts: { drifter: 28, spitter: 3, shellback: 2 } },
+  { wave: 19, intensity: 9, release: false, cadence: 0.60, counts: { charger: 4, splitter: 3, spitter: 3, mine: 4 } },
+  { wave: 20, intensity: 10, release: false, cadence: 0.55, counts: { drifter: 20, spitter: 3, charger: 3, shellback: 4 } },
 ];
 
 // Point cost per enemy, from Part 3.2. The boss (25 points) is not in the script.
 export const POINT_COSTS = { drifter: 1, mine: 1, spitter: 2, splitter: 3, charger: 3, shellback: 5 };
 
 // How a wave beyond 20 splits its point budget between kinds. Leftover points go to drifters.
-const BEYOND_SHARES = { drifter: 0.35, spitter: 0.15, charger: 0.15, mine: 0.1, splitter: 0.15, shellback: 0.1 };
+const BEYOND_SHARES = { drifter: 0.2, spitter: 0.2, charger: 0.2, mine: 0.05, splitter: 0.1, shellback: 0.25 };
 
 const RELEASE_BUDGET_SHARE = 0.6;
-const BUDGET_CAP = 120;
+// Budget growth past wave 20. It has no cap, so the wave keeps scaling (#97); the entity cap still holds.
+const BUDGET_BASE = 60;
+const BUDGET_PER_WAVE = 9;
+
+export const FORMATIONS = Object.freeze(['line', 'wedge', 'ring']);
 
 function tableRow(wave) {
   return WAVE_TABLE[wave - 1];
@@ -53,17 +63,17 @@ export function isReleaseWave(wave) {
   return wave % 5 === 0 && wave % 10 !== 0;
 }
 
-// Point budget for a wave beyond 20: min(120, 60 + 3k), k = wave - 20.
+// Point budget for a wave beyond 20: 60 + 9k, where k = wave - 20. Uncapped (#97: keeps scaling).
 export function budgetFor(wave) {
   const k = Math.max(0, wave - LAST_TABLE_WAVE);
-  return Math.min(BUDGET_CAP, 60 + 3 * k);
+  return BUDGET_BASE + BUDGET_PER_WAVE * k;
 }
 
-// Seconds between spawn groups. Beyond 20: max(1.2, 3.0 - 0.05k).
+// Seconds between school releases. Beyond 20: max(0.5, 0.6 - 0.01k).
 export function cadenceFor(wave) {
   if (wave <= LAST_TABLE_WAVE) return tableRow(wave).cadence;
   const k = wave - LAST_TABLE_WAVE;
-  return Math.max(1.2, 3.0 - 0.05 * k);
+  return Math.max(0.5, 0.6 - 0.01 * k);
 }
 
 // Enemy counts for a wave, every scripted kind present (zero when absent).
@@ -85,48 +95,76 @@ export function countsFor(wave) {
   return counts;
 }
 
-// The wave's spawn plan: kinds interleaved round-robin, then chunked into groups of 2 or 3.
+// Largest school a wave releases: 4 at wave 1, one more every schoolCapGrowEvery waves, capped at schoolMax.
+export function schoolCapFor(wave) {
+  return Math.min(SPAWN.schoolMax, SPAWN.schoolMin + Math.floor((Math.max(1, wave) - 1) / SPAWN.schoolCapGrowEvery));
+}
+
+// Splits n Drifters into schools. Every school holds schoolMin..schoolMax (a remainder under schoolMin
+// is a school of its own), and sizes differ by at most one. Sizes sum to n.
+export function chunkSchools(n, cap = SPAWN.schoolMax, schoolMin = SPAWN.schoolMin) {
+  if (n <= 0) return [];
+  if (n < schoolMin) return [n];
+  let k = Math.ceil(n / cap);
+  if (Math.floor(n / k) < schoolMin) k = Math.floor(n / schoolMin);
+  const base = Math.floor(n / k);
+  const extra = n % k;
+  const sizes = [];
+  for (let i = 0; i < k; i++) sizes.push(i < extra ? base + 1 : base);
+  return sizes;
+}
+
+// The wave's school plan. Kinds are interleaved round-robin, school by school, so a Spitter is never
+// first in a wave: the sim also holds the first Spitter until the Drifter schools are cleared.
 export function planWave(wave) {
   const counts = countsFor(wave);
-  const left = SCRIPTED_KINDS.map((kind) => ({ kind, n: counts[kind] }));
-  const order = [];
+  const cap = schoolCapFor(wave);
+  const lists = SCRIPTED_KINDS.map((kind) => {
+    if (kind === 'drifter') return chunkSchools(counts.drifter, cap).map((size) => ({ kind, size }));
+    return Array.from({ length: counts[kind] }, () => ({ kind, size: 1 }));
+  });
+  const schools = [];
   let more = true;
-  while (more) {
+  for (let i = 0; more; i++) {
     more = false;
-    for (const q of left) {
-      if (q.n > 0) {
-        order.push(q.kind);
-        q.n -= 1;
+    for (const list of lists) {
+      if (i < list.length) {
+        schools.push(list[i]);
         more = true;
       }
     }
-  }
-  const groups = [];
-  for (let i = 0; i < order.length; ) {
-    const remaining = order.length - i;
-    const size = remaining === 4 ? 2 : Math.min(3, remaining);
-    groups.push(order.slice(i, i + size));
-    i += size;
   }
   return {
     wave,
     release: isReleaseWave(wave),
     cadence: cadenceFor(wave),
     counts,
-    groups,
+    schoolCap: cap,
+    schools,
   };
 }
 
-// Flattens a plan into the sim's spawn queue. Each entry is one enemy, and `gap` is the seconds the
-// sim waits after releasing it before releasing the next. Enemies inside a group have gap 0; the
-// last enemy of a group waits the cadence.
-export function spawnQueue(plan) {
-  const queue = [];
-  plan.groups.forEach((group) => {
-    group.forEach((kind, i) => {
-      const last = i === group.length - 1;
-      queue.push({ kind, gap: last ? plan.cadence : 0 });
-    });
-  });
-  return queue;
+// Offsets of a formation's members from its centre, in the school's own frame: x points forward (at Rip),
+// y is lateral. The sim rotates them to the school's heading. Shapes: a line across the front, a wedge
+// with the leader in front, and a ring. Consecutive members sit `spacing` px apart.
+export function formationOffsets(shape, n, spacing) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    if (shape === 'line') {
+      out.push({ x: 0, y: (i - (n - 1) / 2) * spacing });
+    } else if (shape === 'wedge') {
+      if (i === 0) {
+        out.push({ x: 0, y: 0 });
+      } else {
+        const rank = Math.ceil(i / 2);
+        const side = i % 2 === 1 ? 1 : -1;
+        out.push({ x: -rank * spacing * 0.9, y: side * rank * spacing * 0.7 });
+      }
+    } else {
+      const r = Math.max(spacing, (n * spacing) / (2 * Math.PI));
+      const a = (2 * Math.PI * i) / n;
+      out.push({ x: r * Math.cos(a), y: r * Math.sin(a) });
+    }
+  }
+  return out;
 }

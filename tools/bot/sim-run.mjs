@@ -77,19 +77,25 @@ export function runOne(seed, policy, { capSeconds = 300 } = {}) {
 
   let dashBuf = 0;
   let pulseBuf = 0;
+  // A buffered dash keeps the aim it was pressed with (as the browser's input layer does), not the aim of
+  // whichever later step the buffer is finally consumed in.
+  let dashAim = { x: null, y: null };
   let lastDashEnd = null;
   let lastDeflectAt = null;
   let curDashHadKill = null; // null until the first dash; then a flag object for the current dash
 
   while (!game.over && game.time < capSeconds) {
     const intent = policy.decide(game, botRng, mem);
-    if (intent.dash) dashBuf = INPUT_BUFFER;
+    if (intent.dash) {
+      dashBuf = INPUT_BUFFER;
+      dashAim = { x: intent.aimX, y: intent.aimY };
+    }
     if (intent.pulse) pulseBuf = INPUT_BUFFER;
     const input = {
       moveX: intent.moveX,
       moveY: intent.moveY,
-      aimX: intent.aimX,
-      aimY: intent.aimY,
+      aimX: dashBuf > 0 ? dashAim.x : intent.aimX,
+      aimY: dashBuf > 0 ? dashAim.y : intent.aimY,
       dash: dashBuf > 0,
       pulse: pulseBuf > 0,
     };

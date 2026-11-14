@@ -12,6 +12,7 @@ import {
   HITSTOP,
   SPAWN,
   ENEMY,
+  AGGRO,
 } from './config.js';
 // PICKUPS: health recovery and modifier drops (#54). Hooks are marked below.
 import {
@@ -27,7 +28,7 @@ import {
   dashDistanceScale,
   comboDrainScale,
 } from './pickups.js';
-import { planWave, spawnQueue } from './waves.js';
+import { planWave, formationOffsets, FORMATIONS } from './waves.js';
 
 const W = LOGICAL_WIDTH;
 const H = LOGICAL_HEIGHT;
@@ -56,6 +57,47 @@ function steer(e, tx, ty, rate) {
 function chase(e, game, dt, speed, rate) {
   const [ux, uy] = unit(game.player.x - e.x, game.player.y - e.y);
   steer(e, ux * speed, uy * speed, rate * dt);
+}
+
+// Enemies speed up gently with the wave they came from, with no cap (#97), and once aggressive (#83).
+export function speedScaleFor(wave) {
+  return 1 + SPAWN.speedPerWave * (Math.max(1, wave) - 1);
+}
+function moveSpeed(e, base) {
+  return base * speedScaleFor(e.wave) * (e.aggro ? AGGRO.speedMul : 1);
+}
+
+// Spitter bullets: slow at the first Spitter waves, faster each wave, up to a cap (#97 beginner ramp).
+export function bulletSpeedFor(wave) {
+  const c = ENEMY.spitter;
+  return Math.min(c.bulletSpeedMax, c.bulletSpeed + c.bulletSpeedPerWave * (Math.max(2, wave) - 2));
+}
+
+// One-time hint text, shown once per run as a floater the first time its trigger happens (#84).
+export const HINT_TEXT = Object.freeze({
+  spitter: 'DASH THROUGH BULLETS - OR RIGHT-CLICK TO REFLECT',
+  shellback: 'ARMORED FRONT - STRIKE FROM BEHIND OR PULSE IT',
+});
+function hintOnce(game, key, x, y) {
+  if (game.hints[key]) return;
+  game.hints[key] = true;
+  game.events.push({ type: 'hint', text: HINT_TEXT[key], x, y });
+}
+
+// A drifter in a school holds its formation slot while Rip is not close; close in, it chases directly.
+function holdSlot(e, game, dt, speed) {
+  const s = e.school;
+  const c = ENEMY.drifter;
+  const cos = Math.cos(s.heading);
+  const sin = Math.sin(s.heading);
+  const tx = s.x + e.slotX * cos - e.slotY * sin;
+  const ty = s.y + e.slotX * sin + e.slotY * cos;
+  const dx = tx - e.x;
+  const dy = ty - e.y;
+  const d = Math.hypot(dx, dy);
+  const [ux, uy] = unit(dx, dy);
+  const want = Math.min(speed * c.slotSpeed, d * 4); // reach the slot without overshooting it
+  steer(e, ux * want, uy * want, c.steer * dt);
 }
 
 // Deterministic PRNG (mulberry32). The simulation's only source of randomness.
@@ -144,7 +186,11 @@ export const ENEMY_KINDS = {
     points: ENEMY.drifter.points,
     init() {},
     think(e, game, dt) {
-      chase(e, game, dt, ENEMY.drifter.speed, ENEMY.drifter.steer);
+      const c = ENEMY.drifter;
+      const speed = moveSpeed(e, c.speed);
+      const far = Math.hypot(game.player.x - e.x, game.player.y - e.y) > c.chaseRange;
+      if (e.school && far) holdSlot(e, game, dt, speed);
+      else chase(e, game, dt, speed, c.steer);
     },
   },
 
@@ -172,7 +218,7 @@ export const ENEMY_KINDS = {
         dx = -uy * e.strafe; // hold distance and circle the player
         dy = ux * e.strafe;
       }
-      steer(e, dx * c.speed, dy * c.speed, 4 * dt);
+      steer(e, dx * moveSpeed(e, c.speed), dy * moveSpeed(e, c.speed), 4 * dt);
 
       // A shot is only ever started or released while the player is not mid-dash and has had
       // SPITTER.postDashQuiet since the last one, so no bullet arrives with no time to react.
@@ -188,7 +234,8 @@ export const ENEMY_KINDS = {
           const off = e.r + c.bulletRadius + 2;
           const sx = e.x + e.dirX * off;
           const sy = e.y + e.dirY * off;
-          fireBullet(game, sx, sy, e.dirX * c.bulletSpeed, e.dirY * c.bulletSpeed);
+          const v = bulletSpeedFor(e.wave);
+          fireBullet(game, sx, sy, e.dirX * v, e.dirY * v);
           game.events.push({ type: 'enemyShoot', x: sx, y: sy, enemyType: 'spitter' });
         }
       } else {
@@ -200,6 +247,7 @@ export const ENEMY_KINDS = {
           e.dirY = uy;
           e.telegraph = 0;
           game.events.push({ type: 'spitWindup', x: e.x, y: e.y, enemyType: 'spitter' }); // audible before the shot lands
+          hintOnce(game, 'spitter', e.x, e.y); // #84: the first wind-up explains the bullets
         }
       }
     },
@@ -210,6 +258,9 @@ export const ENEMY_KINDS = {
         e.telegraph = 0;
         e.shotCd = ENEMY.spitter.fireInterval;
       }
+    },
+    onAggro(e) {
+      if (e.state !== 'windup') e.shotCd = 0; // a lone Spitter stops waiting out its first-shot delay (#83)
     },
   },
 
@@ -228,7 +279,7 @@ export const ENEMY_KINDS = {
       if (e.state === 'idle') {
         const dist = Math.hypot(p.x - e.x, p.y - e.y);
         const [ux, uy] = unit(p.x - e.x, p.y - e.y);
-        steer(e, ux * c.idleSpeed, uy * c.idleSpeed, 2 * dt);
+        steer(e, ux * moveSpeed(e, c.idleSpeed), uy * moveSpeed(e, c.idleSpeed), 2 * dt);
         e.cooldown -= dt;
         if (e.cooldown <= 0 && dist <= c.triggerRange) {
           // The aim is locked here, so the telegraph line is an honest warning.
@@ -268,6 +319,9 @@ export const ENEMY_KINDS = {
         e.cooldown = Math.max(e.cooldown, 1.0);
       }
     },
+    onAggro(e) {
+      if (e.state === 'idle') e.cooldown = 0; // a lone Charger lunges at the next chance (#83)
+    },
   },
 
   // Armoured front arc. A dash that reaches the front bounces Rip back; from the side or behind it
@@ -278,13 +332,15 @@ export const ENEMY_KINDS = {
     staggerTime: ENEMY.shellback.staggerTime,
     init(e, game) {
       e.facing = Math.atan2(game.player.y - e.y, game.player.x - e.x);
+      hintOnce(game, 'shellback', e.x, e.y); // #84: the first Shellback explains the armour
     },
     think(e, game, dt) {
       const c = ENEMY.shellback;
       const want = Math.atan2(game.player.y - e.y, game.player.x - e.x);
       const limit = c.turnRate * dt;
       e.facing = wrapAngle(e.facing + clamp(wrapAngle(want - e.facing), -limit, limit));
-      steer(e, Math.cos(e.facing) * c.speed, Math.sin(e.facing) * c.speed, 4 * dt);
+      const v = moveSpeed(e, c.speed);
+      steer(e, Math.cos(e.facing) * v, Math.sin(e.facing) * v, 4 * dt);
     },
     dashHit(game, e, d, x, y) {
       if (e.stagger > 0) return 'kill';
@@ -303,7 +359,7 @@ export const ENEMY_KINDS = {
     dieOnContact: true,
     init() {},
     think(e, game, dt) {
-      chase(e, game, dt, ENEMY.splitter.speed, ENEMY.splitter.steer);
+      chase(e, game, dt, moveSpeed(e, ENEMY.splitter.speed), ENEMY.splitter.steer);
     },
     onDeath(game, e) {
       const c = ENEMY.splitter;
@@ -325,7 +381,7 @@ export const ENEMY_KINDS = {
     dieOnContact: true,
     init() {},
     think(e, game, dt) {
-      chase(e, game, dt, ENEMY.mini.speed, ENEMY.mini.steer);
+      chase(e, game, dt, moveSpeed(e, ENEMY.mini.speed), ENEMY.mini.steer);
     },
   },
 
@@ -344,7 +400,8 @@ export const ENEMY_KINDS = {
       e.vx = 0;
       e.vy = 0;
       if (e.state === 'idle') {
-        if (Math.hypot(game.player.x - e.x, game.player.y - e.y) <= c.armRange) {
+        // Armed by Rip coming near, or by itself after selfArmTime so an idle mine cannot stall a wave (#83).
+        if (Math.hypot(game.player.x - e.x, game.player.y - e.y) <= c.armRange || e.age >= c.selfArmTime) {
           e.state = 'armed';
           e.stateT = c.fuse;
           game.events.push({ type: 'mineArm', x: e.x, y: e.y });
@@ -395,7 +452,14 @@ export function createGame(seed = 1, options = {}) {
     bullets: [],
     warnings: [],
     combo: { count: 0, timer: 0, tier: 0 },
-    wave: { number: 0, phase: 'active', timer: 0, queue: [], nextSpawnAt: 0 },
+    wave: { number: 0, phase: 'active', timer: 0, startedAt: 0, total: 0, release: false }, // the newest wave
+    spawnQueue: [],      // school entries not yet released: { wave, kind, size, gap }
+    nextSpawnAt: 0,      // the next school may be released at this time
+    liveWaves: [],       // waves not yet cleared: { number, total, release }
+    schools: [],         // Drifter schools: { id, x, y, heading, speed, wave }, anchors for formation (#97)
+    hints: {},           // one-time hints already shown this run (#84)
+    spitterReleased: false, // the first Spitter waits until the Drifter schools are cleared
+    spitterWaitFrom: -1,    // when the first Spitter first came due on the gate (-1: not yet)
     events: [],
   };
   beginWave(game, options.startWave ?? 1);
@@ -453,6 +517,7 @@ export function update(game, input, dt) {
   if (Math.hypot(aimX - p.x, aimY - p.y) > 4) p.facing = Math.atan2(aimY - p.y, aimX - p.x);
 
   const worldDt = game.slowmo > 0 ? dt * PULSE.slowmoScale : dt;
+  updateSchools(game, worldDt);
   for (const e of game.enemies) updateEnemy(game, e, worldDt);
   for (const b of game.bullets) updateBullet(b, worldDt);
 
@@ -515,7 +580,6 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
   e.alive = false;
   const def = ENEMY_KINDS[e.kind];
   const c = game.combo;
-  const prevTier = c.tier; // PICKUPS
   c.count += 1;
   c.timer = comboWindowFor(c.count);
   const mult = multiplierFor(c.count);
@@ -540,7 +604,7 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
   });
   if (def.onDeath) def.onDeath(game, e);
   // PICKUPS: drop roll, then the Undertow shockwave chain (victims die through killEnemy too).
-  onKill(game, e, c.tier > prevTier);
+  onKill(game, e);
   let kills = 1;
   for (const v of shockwaveVictims(game, e)) kills += killEnemy(game, v, slashIndex + kills, 'shockwave');
   return kills;
@@ -552,7 +616,7 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
 // Lunge assist: if the nearest enemy inside the aim cone is between the dash distance and
 // DASH.lungeMaxDistance out, and the blade would reach it, the dash is extended along the aim line
 // to pass through it. A dash is never shortened or re-aimed.
-function planDash(game, aimX, aimY) {
+export function planDash(game, aimX, aimY) {
   const p = game.player;
   let [dx, dy] = unit(aimX - p.x, aimY - p.y);
   if (dx === 0 && dy === 0) {
@@ -734,6 +798,8 @@ function startBounce(game, d) {
   p.sinceDash = 0;
   const sx = p.x;
   const sy = p.y;
+  // The lesson costs tempo, not charges: the deflected dash's charge is refunded (#85).
+  p.dash.charges = Math.min(dashMaxCharges(game), p.dash.charges + 1);
   p.bounce = {
     t: 0,
     dur: DASH.bounceTime,
@@ -849,22 +915,30 @@ function entityCount(game) {
   return game.enemies.length + game.warnings.length + game.bullets.length;
 }
 
-export function spawnEnemy(game, kind, x, y, wave = game.wave.number) {
+// A school member passes its school and its formation slot (x, y offsets in the school frame) as `slot`.
+export function spawnEnemy(game, kind, x, y, wave = game.wave.number, slot = null) {
   const def = ENEMY_KINDS[kind];
+  // Spawns sit inside the arena clamp, so no enemy starts outside it (#82).
+  const [cx, cy] = clampToArena(x, y, def.radius);
   const e = {
     id: game.nextId++,
     kind,
     wave,
-    x,
-    y,
-    px: x,
-    py: y,
+    x: cx,
+    y: cy,
+    px: cx,
+    py: cy,
     vx: 0,
     vy: 0,
     r: def.radius,
     alive: true,
     stagger: 0,
     age: 0,
+    aggro: false,        // lone enemies turn aggressive after AGGRO.loneTime (#83)
+    loneT: 0,
+    school: slot ? slot.school : null,
+    slotX: slot ? slot.x : 0,
+    slotY: slot ? slot.y : 0,
     grace: Math.max(def.graceTime ?? 0, SPAWN.safeTime), // no enemy hurts for its first SPAWN.safeTime
     facing: 0,
     hitWall: false,
@@ -1025,62 +1099,196 @@ export function damagePlayer(game, fromX, fromY) {
 
 // ---- Wave script ------------------------------------------------------------------------------
 
-// Starts wave `number`: plans it from the script and queues its spawns. The first spawn waits
-// SPAWN.groupLeadIn so the banner lands first.
+// Where a school's anchor appears: on the arena edge, this far inside it, at least minDistFromPlayer from Rip.
+const SCHOOL_INSET = ARENA.inset + 30;
+
+// Starts wave `number`: plans it as schools and queues them. The first school waits SPAWN.groupLeadIn
+// so the banner lands first. The new wave is queued behind any schools still waiting from older waves.
 function beginWave(game, number) {
+  const plan = planWave(number);
   const w = game.wave;
+  let total = 0;
+  for (const school of plan.schools) {
+    game.spawnQueue.push({ wave: number, kind: school.kind, size: school.size, gap: plan.cadence });
+    total += school.size;
+  }
   w.number = number;
   w.phase = 'active';
-  w.queue = spawnQueue(planWave(number));
-  w.nextSpawnAt = game.time + SPAWN.groupLeadIn;
+  w.timer = 0;
+  w.startedAt = game.time;
+  w.total = total;
+  w.release = plan.release;
+  game.liveWaves.push({ number, total, release: plan.release });
+  game.nextSpawnAt = Math.max(game.nextSpawnAt, game.time + SPAWN.groupLeadIn);
   game.events.push({ type: 'waveStart', wave: number });
 }
 
-// The wave state machine. Active: release queued enemies one at a time, as warnings, once their gap
-// has passed and the entity cap has room. A wave clears when its queue is empty and every enemy it
-// spawned is dead. Then comes the breather, and the next wave starts after it.
+// Enemies, warnings and queued schools that still belong to wave n. A wave is cleared when this is zero.
+function remainingOf(game, n) {
+  let r = 0;
+  for (const q of game.spawnQueue) if (q.wave === n) r += q.size;
+  for (const wn of game.warnings) if (wn.wave === n) r += 1;
+  for (const e of game.enemies) if (e.alive && e.wave === n) r += 1;
+  return r;
+}
+
+// The wave state machine (#83, #97). Schools are released one at a time, as warnings, once their gap has
+// passed, the entity cap has room and (for the first Spitter) the gate is open. Then:
+//  - A non-release wave hands over to the next wave once it is down to SPAWN.stragglers of its count, or
+//    after SPAWN.waveTimeLimit, so waves overlap. The old wave's stragglers keep fighting.
+//  - A release wave runs to a clear, then a SPAWN.breather, and the next wave starts after it.
+// A wave clears when none of its enemies, warnings or queued schools remain.
 function updateSpawner(game, dt) {
   if (!game.spawning) return;
-  const w = game.wave;
-
-  if (w.phase === 'breather') {
-    w.timer -= dt;
-    if (w.timer <= 0) beginWave(game, w.number + 1);
-    return;
-  }
-
-  if (w.queue.length > 0 && game.time >= w.nextSpawnAt && entityCount(game) < SPAWN.maxEntities) {
-    const entry = w.queue.shift();
-    // The first minute teaches chaining with Drifters only: a scripted kind becomes a Drifter.
-    const kind = game.time < SPAWN.drifterOnlyUntil ? 'drifter' : entry.kind;
-    const [x, y] = spawnPoint(game);
-    game.warnings.push({ kind, x, y, t: SPAWN.warning, wave: w.number });
-    w.nextSpawnAt = game.time + entry.gap;
-  }
-
+  releaseSchool(game);
   for (const wn of game.warnings) wn.t -= dt;
   const due = game.warnings.filter((wn) => wn.t <= 0);
   if (due.length > 0) {
     game.warnings = game.warnings.filter((wn) => wn.t > 0);
-    for (const wn of due) spawnEnemy(game, wn.kind, wn.x, wn.y, wn.wave);
+    for (const wn of due) spawnEnemy(game, wn.kind, wn.x, wn.y, wn.wave, wn.slot);
+  }
+  updateLoneEnemies(game, dt);
+
+  const w = game.wave;
+  if (w.phase === 'breather') {
+    w.timer -= dt;
+    if (w.timer <= 0) beginWave(game, w.number + 1);
+  } else {
+    const age = game.time - w.startedAt;
+    if (w.release) {
+      if (age >= SPAWN.releaseTimeLimit) beginWave(game, w.number + 1); // the breather is kept when it clears
+    } else {
+      const threshold = Math.max(1, Math.ceil(SPAWN.stragglers * w.total));
+      if (remainingOf(game, w.number) <= threshold || age >= SPAWN.waveTimeLimit) beginWave(game, w.number + 1);
+    }
   }
 
-  const pending =
-    w.queue.length > 0 ||
-    game.warnings.some((wn) => wn.wave === w.number) ||
-    game.enemies.some((e) => e.alive && e.wave === w.number);
-  if (!pending) {
-    onWaveEnd(game); // PICKUPS: flawless wave heal
-    game.events.push({ type: 'waveClear', wave: w.number });
-    w.phase = 'breather';
-    w.timer = SPAWN.breather;
+  for (const rec of [...game.liveWaves]) {
+    if (remainingOf(game, rec.number) > 0) continue;
+    game.liveWaves = game.liveWaves.filter((r) => r !== rec);
+    game.events.push({ type: 'waveClear', wave: rec.number });
+    if (rec.number === w.number && w.phase === 'active') {
+      w.phase = 'breather';
+      w.timer = rec.release ? SPAWN.breather : 0; // a non-release wave that cleared early hands over at once
+    }
+  }
+  pruneSchools(game);
+}
+
+// Releases the first queued school that may come now: due by its gap, with room under the entity cap.
+// The first Spitter of the run waits until no Drifter is alive, warning or queued (#84).
+function releaseSchool(game) {
+  if (game.spawnQueue.length === 0 || game.time < game.nextSpawnAt) return;
+  const idx = game.spawnQueue.findIndex((entry) => spawnAllowed(game, entry));
+  if (idx < 0) return;
+  const entry = game.spawnQueue[idx];
+  if (entityCount(game) + entry.size > SPAWN.maxEntities) return; // the wave script waits for room
+  game.spawnQueue.splice(idx, 1);
+  // The first minute teaches chaining with Drifters only: a scripted kind becomes a Drifter.
+  const kind = game.time < SPAWN.drifterOnlyUntil ? 'drifter' : entry.kind;
+  if (kind === 'spitter') game.spitterReleased = true;
+  placeSchool(game, kind, entry.size, entry.wave);
+  game.nextSpawnAt = game.time + entry.gap;
+}
+
+// The first Spitter waits for the Drifter schools to be cleared: none queued or warned, and no more than
+// SPAWN.spitterGateDrifters left alive. It never waits past SPAWN.spitterGateTime, so a player who
+// ignores Drifters still meets Spitters (#84, and no stall).
+function spawnAllowed(game, entry) {
+  if (entry.kind !== 'spitter' || game.spitterReleased) return true;
+  if (game.time < SPAWN.drifterOnlyUntil) return true;
+  if (game.spitterWaitFrom < 0) game.spitterWaitFrom = game.time;
+  if (game.time - game.spitterWaitFrom >= SPAWN.spitterGateTime) return true;
+  const drifterQueued = game.spawnQueue.some((q) => q.kind === 'drifter');
+  const drifterWarned = game.warnings.some((wn) => wn.kind === 'drifter');
+  let drifterAlive = 0;
+  for (const e of game.enemies) if (e.alive && e.kind === 'drifter') drifterAlive += 1;
+  return !drifterQueued && !drifterWarned && drifterAlive <= SPAWN.spitterGateDrifters;
+}
+
+// Puts a school on the field as warnings. A Drifter school gets a formation (line, wedge or ring) that
+// swims with its anchor; every other kind is a school of one, placed alone.
+function placeSchool(game, kind, size, wave) {
+  const [ax, ay] = spawnPoint(game);
+  if (kind !== 'drifter') {
+    const [x, y] = clampToArena(ax, ay, ENEMY[kind].radius);
+    game.warnings.push({ kind, x, y, t: SPAWN.warning, wave, slot: null });
+    return;
+  }
+  const p = game.player;
+  const heading = Math.atan2(p.y - ay, p.x - ax);
+  const shape = size > 1 ? FORMATIONS[Math.floor(game.rng() * FORMATIONS.length)] : 'line';
+  const school = {
+    id: game.nextId++,
+    x: ax,
+    y: ay,
+    heading,
+    speed: ENEMY.drifter.speed * ENEMY.drifter.schoolSpeed * speedScaleFor(wave),
+    wave,
+  };
+  game.schools.push(school);
+  const offsets = formationOffsets(shape, size, SPAWN.schoolSpacing);
+  const cos = Math.cos(heading);
+  const sin = Math.sin(heading);
+  for (const o of offsets) {
+    const x = ax + o.x * cos - o.y * sin;
+    const y = ay + o.x * sin + o.y * cos;
+    const [cx, cy] = clampToArena(x, y, ENEMY.drifter.radius);
+    game.warnings.push({ kind, x: cx, y: cy, t: SPAWN.warning, wave, slot: { school, x: o.x, y: o.y } });
   }
 }
 
-// A point on the arena edge at least minDistFromPlayer from the player (12 tries, then the last one).
+// Schools hold their formation: the anchor swims toward Rip at the school's speed and faces her.
+function updateSchools(game, dt) {
+  if (game.schools.length === 0) return;
+  const p = game.player;
+  for (const s of game.schools) {
+    const dx = p.x - s.x;
+    const dy = p.y - s.y;
+    const d = Math.hypot(dx, dy);
+    s.heading = Math.atan2(dy, dx);
+    if (d > 1e-6) {
+      const step = Math.min(d, s.speed * dt);
+      s.x += (dx / d) * step;
+      s.y += (dy / d) * step;
+    }
+  }
+}
+
+// Drops schools with no enemy or warning left, so the list stays short.
+function pruneSchools(game) {
+  if (game.schools.length === 0) return;
+  const live = new Set();
+  for (const e of game.enemies) if (e.alive && e.school) live.add(e.school.id);
+  for (const wn of game.warnings) if (wn.slot) live.add(wn.slot.school.id);
+  game.schools = game.schools.filter((s) => live.has(s.id));
+}
+
+// A lone enemy (the last of its wave, with nothing else of that wave pending) turns aggressive after
+// AGGRO.loneTime. Mines are exempt: an idle mine arms itself instead (#83).
+function updateLoneEnemies(game, dt) {
+  const alive = new Map();
+  for (const e of game.enemies) if (e.alive) alive.set(e.wave, (alive.get(e.wave) ?? 0) + 1);
+  const pending = new Set();
+  for (const q of game.spawnQueue) pending.add(q.wave);
+  for (const wn of game.warnings) pending.add(wn.wave);
+  for (const e of game.enemies) {
+    if (!e.alive || e.kind === 'mine' || e.aggro) continue;
+    const lone = alive.get(e.wave) === 1 && !pending.has(e.wave);
+    e.loneT = lone ? e.loneT + dt : 0;
+    if (e.loneT >= AGGRO.loneTime) {
+      e.aggro = true;
+      const hook = ENEMY_KINDS[e.kind].onAggro;
+      if (hook) hook(e, game);
+    }
+  }
+}
+
+// A spawn point (a school's anchor) on the arena edge, at least minDistFromPlayer from Rip
+// (12 tries, then the last one).
 function spawnPoint(game) {
   const p = game.player;
-  const inset = SPAWN.edgeInset;
+  const inset = SCHOOL_INSET;
   let x = inset;
   let y = inset;
   for (let attempt = 0; attempt < 12; attempt++) {

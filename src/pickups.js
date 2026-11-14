@@ -36,7 +36,6 @@ export function createPickupState() {
     items: [],          // pickups on the field: { id, kind, x, y, vx, vy, age, r }
     lastDropAt: -Infinity,
     healPity: 0,        // hurt kills since the last heal drop
-    healDue: false,     // set when a kill reaches a new combo tier while hurt; cleared by a heal drop
     modPity: 0,         // kills since the last modifier drop
     shieldGrace: 0,    // seconds of contact-damage grace left after a Shield Scale absorbs a hit
     waveHurt: false,    // HP was lost during the current wave
@@ -72,29 +71,26 @@ export function comboDrainScale(game) {
 
 // ---- Hooks called from game.js -------------------------------------------------------------
 
-// Kill hook (after combo and score). `tierUp` is true when this kill reached a new combo tier.
-// Rolls at most one drop per kill: a heal if one is due, otherwise a modifier roll.
-export function onKill(game, e, tierUp) {
+// Kill hook (after combo and score). Rolls at most one drop per kill: a heal while hurt, then a modifier roll.
+// A combo tier reached while hurt no longer guarantees a heal (#87): recovery is a chance per kill, with a pity.
+export function onKill(game, e) {
   const s = game.pickups;
   const p = game.player;
   const hurt = p.hp < PLAYER.maxHp;
 
   if (hurt) {
     s.healPity += 1;
-    if (tierUp) s.healDue = true;
   } else {
-    // Heal drops only happen while hurt, so the pity counter and any due heal reset at full HP.
+    // Heal drops only happen while hurt, so the pity counter resets at full HP.
     s.healPity = 0;
-    s.healDue = false;
   }
   s.modPity += 1;
 
   if (hurt) {
-    const guaranteed = s.healDue || s.healPity >= PICKUP.heal.pityKills;
+    const guaranteed = s.healPity >= PICKUP.heal.pityKills;
     if ((guaranteed || game.rng() < healChance(game)) && canDrop(game)) {
       spawnPickup(game, 'heal', e.x, e.y);
       s.healPity = 0;
-      s.healDue = false;
     }
   }
 
@@ -193,11 +189,10 @@ export function onHurt(game) {
   game.pickups.waveHurt = true;
 }
 
-// Wave-clear hook, called when a wave clears (its last enemy dies). A wave with no HP lost restores HP.
+// Wave-clear hook, called when a wave clears. Recovery is earned, not automatic (#87): a flawless wave no
+// longer restores HP. Only heal orbs do, and a combo tier reached while hurt makes the next one due.
 export function onWaveEnd(game) {
-  const s = game.pickups;
-  if (!s.waveHurt) healPlayer(game, game.player.x, game.player.y, 'flawless');
-  s.waveHurt = false;
+  game.pickups.waveHurt = false;
 }
 
 // ---- Internals -----------------------------------------------------------------------------

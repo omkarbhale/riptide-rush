@@ -54,6 +54,7 @@ export const GAME_EVENT_TYPES = Object.freeze([
   'spitWindup',
   'chargerTelegraph',
   'chargerLunge',
+  'hint', // one-time lesson text (#84): the first Spitter wind-up or the first Shellback
 ]);
 
 const SPAWN_BURST_WINDOW_S = 0.2; // spawn markers closer than this (sim seconds) belong to one burst (#79)
@@ -296,6 +297,12 @@ export const FEEDBACK = Object.freeze({
   // before it leaves. The shot itself is enemyShoot above.
   spitWindup: {
     sound: (ev) => ({ name: 'chargerTelegraph', pitch: 1.5, volume: 0.35, pan: panFor(ev.x) }),
+  },
+
+  // The one-time hint (#84): a soft tick and a gold floater that names the lesson, over Rip.
+  hint: {
+    sound: () => ({ name: 'uiClick', pitch: 1.4, pan: 0 }),
+    floater: (ev) => ({ text: ev.text, color: PALETTE.gold, life: 2.2, size: 18 }),
   },
 
   // A charger starts its telegraph (0.6 s before the lunge): the warning whine, panned to the charger.

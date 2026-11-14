@@ -2,8 +2,8 @@
 // intent per step: a move vector, an aim point and whether a dash or pulse was pressed this step.
 // sim-run.mjs turns presses into the sim's buffered input. Policies only read the game; they never
 // write to it. Any randomness comes from the rng the harness passes in, so runs stay seeded.
-import { ARENA, DASH, ENEMY, LOGICAL_HEIGHT as H, LOGICAL_WIDTH as W, PLAYER, PULSE } from '../../src/config.js';
-import { segmentHitsCircle } from '../../src/game.js';
+import { ARENA, DASH, ENEMY, LOGICAL_HEIGHT as H, LOGICAL_WIDTH as W, PICKUP, PLAYER, PULSE } from '../../src/config.js';
+import { distToSegment, planDash, segmentHitsCircle } from '../../src/game.js';
 
 const TAU = Math.PI * 2;
 const LO_X = ARENA.inset + PLAYER.radius;
@@ -107,15 +107,28 @@ export const beginner = {
 
 // ---- Intermediate ---------------------------------------------------------------------------------
 // Keeps a loose distance from the nearest non-mine enemy. Dashes at it whenever a charge is ready and it
-// is in range. Pulses when an enemy bullet is about to reach her.
+// is in range. Pulses when an enemy bullet is about to reach her. Modelled as a decent human (#97):
+// a target or bullet is only acted on REACTION seconds after it came into view, the dash aim is off by up
+// to AIM_ERROR radians, and it cannot dash more often than every MIN_DASH_GAP seconds (about 4 a second).
+const REACTION = 0.2; // seconds
+const AIM_ERROR = (4 * Math.PI) / 180; // radians either side of the aim line
+const MIN_DASH_GAP = 0.25; // seconds between dash presses
+
 export const intermediate = {
   name: 'intermediate',
   salt: 0x2002,
-  createMemory: () => ({}),
-  decide(game) {
+  createMemory: () => ({ seen: new Map(), lastDash: -Infinity }),
+  decide(game, rng, mem) {
     const p = game.player;
     const out = blankIntent();
-    const target = nearest(game, notMine) ?? nearest(game, () => true);
+    // Reaction: the first step an id is in view stamps it; it counts only after REACTION seconds.
+    const actionable = (id) => {
+      if (!mem.seen.has(id)) mem.seen.set(id, game.time);
+      return game.time - mem.seen.get(id) >= REACTION;
+    };
+    // A human reads the armour: a Shellback whose front faces Rip is not a dash target (it would deflect).
+    const armoured = (e) => e.kind === 'shellback' && e.stagger <= 0 && Math.abs(wrap(Math.atan2(p.y - e.y, p.x - e.x) - e.facing)) <= ENEMY.shellback.armorHalfAngle;
+    const target = nearest(game, (e) => notMine(e) && !armoured(e)) ?? nearest(game, notMine) ?? nearest(game, () => true);
     if (target) {
       const [ux, uy] = norm(target.e.x - p.x, target.e.y - p.y);
       if (target.d > 170) {
@@ -131,7 +144,7 @@ export const intermediate = {
     }
 
     const threats = incomingBullets(game, 0.5);
-    if (threats.length > 0) {
+    if (threats.length > 0 && actionable(threats[0].b.id)) {
       const [bx, by] = norm(threats[0].b.vx, threats[0].b.vy);
       out.moveX += -by * 1.5; // sidestep the bullet's line
       out.moveY += bx * 1.5;
@@ -140,12 +153,29 @@ export const intermediate = {
     out.moveX += wx;
     out.moveY += wy;
 
-    if (target && p.dash.charges >= 1 && p.dash.active === null && target.d <= 320) {
+    if (
+      target &&
+      p.dash.charges >= 1 &&
+      p.dash.active === null &&
+      target.d <= 320 &&
+      !armoured(target.e) &&
+      actionable(target.e.id) &&
+      game.time - mem.lastDash >= MIN_DASH_GAP
+    ) {
+      const base = Math.atan2(target.e.y - p.y, target.e.x - p.x);
+      const a = base + (rng() * 2 - 1) * AIM_ERROR;
       out.dash = true;
-      out.aimX = target.e.x;
-      out.aimY = target.e.y;
+      out.aimX = p.x + Math.cos(a) * target.d;
+      out.aimY = p.y + Math.sin(a) * target.d;
+      mem.lastDash = game.time;
     }
-    if (p.pulseCooldown <= 0 && threats.length > 0 && threats[0].dist <= PULSE.radius && threats[0].t < 0.45) {
+    if (
+      p.pulseCooldown <= 0 &&
+      threats.length > 0 &&
+      threats[0].dist <= PULSE.radius &&
+      threats[0].t < 0.45 &&
+      actionable(threats[0].b.id)
+    ) {
       out.pulse = true;
     }
     return out;
@@ -160,23 +190,75 @@ export const intermediate = {
 const PLAN_EVERY = 8; // steps between re-plans: about 67 ms, a quick but human-plausible think time
 const PLAN_REACH = 340; // enemies farther than this are not part of a chain yet
 const RING_AIMS = 12;
+const CLUSTER_RADIUS = 60; // px: enemies this close to one another count as one school for a cluster aim
 const VALUE = { drifter: 1, mini: 0.6, spitter: 1.2, charger: 1.2, splitter: 1.5, shellback: 1.5, mine: 0.8 };
+const PICKUP_VALUE = 1.5; // a heal or modifier the dash path would collect
+const SHELLBACK_KEEPOUT = 80; // px: the expert steps away from a Shellback this close
+const PICKUP_REACH = 260; // px: how far the expert will go out of its way for a pickup
 
-// True if a dash from p along (ux, uy) reaches the front arc of a Shellback, which would deflect it.
-function frontal(e, p, ux, uy) {
-  const s = clamp((e.x - p.x) * ux + (e.y - p.y) * uy, 0, DASH.distance);
+// True if a dash from p along (ux, uy) for `dist` px reaches the front arc of a Shellback, which would
+// deflect it. Uses the Shellback's facing, which the expert can see (#97: the harness is honest about it).
+function frontal(e, p, ux, uy, dist) {
+  const s = clamp((e.x - p.x) * ux + (e.y - p.y) * uy, 0, dist);
   const cx = p.x + ux * s;
   const cy = p.y + uy * s;
   const ang = Math.atan2(cy - e.y, cx - e.x);
   return Math.abs(wrap(ang - e.facing)) <= ENEMY.shellback.armorHalfAngle;
 }
 
-// Best dash from Rip's current position: the aim point whose swept path kills the most value.
+// Does the dash's blade meet this Shellback's armour first? The sim deflects on the first point of the
+// path that touches the blade's reach, and reads the armour from the angle to that point. Mirrors that.
+function deflectsOn(e, p, plan) {
+  const R = e.r + DASH.bladeRadius;
+  const dx = plan.ex - p.x;
+  const dy = plan.ey - p.y;
+  const fx = p.x - e.x;
+  const fy = p.y - e.y;
+  const a = dx * dx + dy * dy;
+  const b = 2 * (fx * dx + fy * dy);
+  const c = fx * fx + fy * fy - R * R;
+  if (a <= 0) return false;
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return false;
+  const t = Math.max(0, (-b - Math.sqrt(disc)) / (2 * a));
+  if (t > 1) return false;
+  const qx = p.x + dx * t;
+  const qy = p.y + dy * t;
+  const ang = Math.atan2(qy - e.y, qx - e.x);
+  return Math.abs(wrap(ang - e.facing)) <= ENEMY.shellback.armorHalfAngle;
+}
+
+// Mirrors the sim's closing slash: a point within finalArcRadius of the dash end, forward of it.
+function inFinalArc(plan, x, y) {
+  const vx = x - plan.ex;
+  const vy = y - plan.ey;
+  return vx * vx + vy * vy <= DASH.finalArcRadius * DASH.finalArcRadius && vx * plan.dirX + vy * plan.dirY >= 0;
+}
+
+// Best dash from Rip's current position: the aim whose swept path kills the most value. The dash is the
+// sim's own plan (planDash), so lunge assist and Frenzy reach are counted (#97: the expert sees its reach).
+// Pickups the path would collect add value but never trigger a dash on their own.
 function planChain(game) {
   const p = game.player;
   const near = [];
   for (const e of game.enemies) if (e.alive && Math.hypot(e.x - p.x, e.y - p.y) <= PLAN_REACH) near.push(e);
+  const items = game.pickups.items.filter((it) => Math.hypot(it.x - p.x, it.y - p.y) <= PLAN_REACH);
   const aims = near.map((e) => [e.x, e.y]);
+  // Cluster aims: the centroid of the enemies around each one. A line through a school is where a dash
+  // kills the most, so the planner tries one for every school it can see (#97: multi-kill dashes).
+  for (const e of near) {
+    let cx = 0;
+    let cy = 0;
+    let n = 0;
+    for (const o of near) {
+      if (Math.hypot(o.x - e.x, o.y - e.y) <= CLUSTER_RADIUS) {
+        cx += o.x;
+        cy += o.y;
+        n += 1;
+      }
+    }
+    if (n > 1) aims.push([cx / n, cy / n]);
+  }
   for (let i = 0; i < RING_AIMS; i++) {
     const a = (i * TAU) / RING_AIMS;
     aims.push([p.x + Math.cos(a) * 100, p.y + Math.sin(a) * 100]);
@@ -186,21 +268,25 @@ function planChain(game) {
   for (const [ax, ay] of aims) {
     const [ux, uy] = norm(ax - p.x, ay - p.y);
     if (ux === 0 && uy === 0) continue;
-    const ex = clamp(p.x + ux * DASH.distance, LO_X, HI_X);
-    const ey = clamp(p.y + uy * DASH.distance, LO_Y, HI_Y);
+    const plan = planDash(game, ax, ay);
     let kills = 0;
     let value = 0;
     let blocked = false;
     for (const e of near) {
-      if (!segmentHitsCircle(p.x, p.y, ex, ey, e.x, e.y, e.r + PLAYER.radius)) continue;
-      if (e.kind === 'shellback' && e.stagger <= 0 && frontal(e, p, ux, uy)) {
+      const hit =
+        segmentHitsCircle(p.x, p.y, plan.ex, plan.ey, e.x, e.y, e.r + DASH.bladeRadius) || inFinalArc(plan, e.x, e.y);
+      if (!hit) continue;
+      if (e.kind === 'shellback' && e.stagger <= 0 && deflectsOn(e, p, plan)) {
         blocked = true;
         break;
       }
       kills += 1;
       value += VALUE[e.kind] ?? 1;
     }
-    if (!blocked && value > best.value) best = { kills, value, aimX: ax, aimY: ay };
+    for (const it of items) {
+      if (distToSegment(p.x, p.y, plan.ex, plan.ey, it.x, it.y) <= PICKUP.dashCollectRadius) value += PICKUP_VALUE;
+    }
+    if (!blocked && kills > 0 && value > best.value) best = { kills, value, aimX: ax, aimY: ay };
   }
   return best;
 }
@@ -274,6 +360,15 @@ export const expert = {
           mx += ux * w;
           my += uy * w;
         }
+      } else if (e.kind === 'shellback') {
+        // Keep out of a Shellback's reach: it hurts on contact, and its armour is no threat from the side.
+        const d = Math.hypot(p.x - e.x, p.y - e.y);
+        if (d < SHELLBACK_KEEPOUT) {
+          const [ux, uy] = norm(p.x - e.x, p.y - e.y);
+          const w = (1.5 * (SHELLBACK_KEEPOUT - d)) / SHELLBACK_KEEPOUT;
+          mx += ux * w;
+          my += uy * w;
+        }
       } else if (e.kind === 'charger' && (e.state === 'telegraph' || e.state === 'lunge')) {
         const along = (p.x - e.x) * e.dirX + (p.y - e.y) * e.dirY;
         if (along > 0) {
@@ -309,12 +404,31 @@ export const expert = {
         my += cy * 0.5;
       }
     }
+    // With no chain to fire, pick up a nearby heal or modifier: a skilled player collects them on the way.
+    if (plan.kills === 0) {
+      let best = null;
+      let bd = PICKUP_REACH;
+      for (const it of game.pickups.items) {
+        const d = Math.hypot(it.x - p.x, it.y - p.y);
+        if (d < bd) {
+          bd = d;
+          best = it;
+        }
+      }
+      if (best) {
+        const [ux, uy] = norm(best.x - p.x, best.y - p.y);
+        mx += ux;
+        my += uy;
+      }
+    }
     const [wx, wy] = wallPush(p);
     out.moveX = mx + wx;
     out.moveY = my + wy;
 
-    // Dash: fire the planned chain as soon as it kills something and a charge is ready.
-    if (plan.kills >= 1 && p.dash.charges >= 1 && !busy) {
+    // Dash: fire a planned chain when it is worth a charge: two or more kills, or a single kill while two or
+    // more charges are ready. A lone kill on the last charge waits for a chain.
+    const worth = plan.kills >= 1;
+    if (worth && p.dash.charges >= 1 && !busy) {
       out.dash = true;
       out.aimX = plan.aimX;
       out.aimY = plan.aimY;
