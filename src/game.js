@@ -54,6 +54,25 @@ export function segmentHitsCircle(ax, ay, bx, by, cx, cy, r) {
   return px * px + py * py <= r * r;
 }
 
+// Distance from centre c to the segment a->b.
+export function distToSegment(ax, ay, bx, by, cx, cy) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? clamp(((cx - ax) * dx + (cy - ay) * dy) / len2, 0, 1) : 0;
+  return Math.hypot(ax + dx * t - cx, ay + dy * t - cy);
+}
+
+// The closing slash arc: a point within r of the dash end (ex, ey), in the half-circle the dash
+// was heading into (direction dx, dy).
+function inFinalArc(ex, ey, dx, dy, x, y, r) {
+  const vx = x - ex;
+  const vy = y - ey;
+  return vx * vx + vy * vy <= r * r && vx * dx + vy * dy >= 0;
+}
+
+const LUNGE_CONE_COS = Math.cos((DASH.lungeConeDegrees * Math.PI) / 180);
+
 // Score multiplier for a combo count: 1 + floor(combo / 5), capped at x10.
 export function multiplierFor(count) {
   return Math.min(COMBO.multiplierCap, 1 + Math.floor(count / COMBO.multiplierStep));
@@ -112,8 +131,9 @@ export const ENEMY_KINDS = {
     points: ENEMY.spitter.points,
     minWave: ENEMY.spitter.minWave,
     weight: ENEMY.spitter.weight,
-    init(e, game) {
+    init(e) {
       e.shotCd = ENEMY.spitter.firstShotDelay;
+      e.telegraph = 0;
     },
     think(e, game, dt) {
       const c = ENEMY.spitter;
@@ -134,11 +154,40 @@ export const ENEMY_KINDS = {
       }
       steer(e, dx * c.speed, dy * c.speed, 4 * dt);
 
-      e.shotCd -= dt;
-      if (e.shotCd <= 0 && dist <= c.fireRange) {
-        e.shotCd = c.fireInterval;
-        const off = e.r + c.bulletRadius + 2;
-        fireBullet(game, e.x + ux * off, e.y + uy * off, ux * c.bulletSpeed, uy * c.bulletSpeed);
+      // A shot is only ever started or released while the player is not mid-dash and has had
+      // SPITTER.postDashQuiet since the last one, so no bullet arrives with no time to react.
+      const quiet = !p.dash.active && p.sinceDash >= c.postDashQuiet;
+      if (e.state === 'windup') {
+        if (quiet) e.stateT -= dt;
+        e.telegraph = 1 - Math.max(0, e.stateT) / c.windup;
+        if (e.stateT <= 0 && quiet) {
+          // Release along the aim locked when the wind-up started.
+          e.state = 'idle';
+          e.telegraph = 0;
+          e.shotCd = c.fireInterval;
+          const off = e.r + c.bulletRadius + 2;
+          const sx = e.x + e.dirX * off;
+          const sy = e.y + e.dirY * off;
+          fireBullet(game, sx, sy, e.dirX * c.bulletSpeed, e.dirY * c.bulletSpeed);
+          game.events.push({ type: 'enemyShoot', x: sx, y: sy, enemyType: 'spitter' });
+        }
+      } else {
+        e.shotCd -= dt;
+        if (e.shotCd <= 0 && dist <= c.fireRange && quiet) {
+          e.state = 'windup';
+          e.stateT = c.windup;
+          e.dirX = ux;
+          e.dirY = uy;
+          e.telegraph = 0;
+        }
+      }
+    },
+    onStagger(e) {
+      // A pulse breaks the wind-up; the shot is simply re-armed.
+      if (e.state === 'windup') {
+        e.state = 'idle';
+        e.telegraph = 0;
+        e.shotCd = ENEMY.spitter.fireInterval;
       }
     },
   },
@@ -224,6 +273,10 @@ export function createGame(seed = 1, options = {}) {
       facing: 0,
       hp: PLAYER.maxHp,
       invuln: 0,
+      dashGrace: 0,        // seconds of invulnerability left after a dash (afterglow for the renderer)
+      sinceDash: ENEMY.spitter.postDashQuiet, // seconds since the last dash ended (starts quiet)
+      aimX: W / 2,         // last aim point, for the renderer's aim preview
+      aimY: H / 2,
       pulseCooldown: 0,
       dash: { charges: DASH.maxCharges, recharge: 0, active: null },
     },
@@ -264,6 +317,8 @@ export function update(game, input, dt) {
   }
 
   p.invuln = Math.max(0, p.invuln - dt);
+  p.dashGrace = Math.max(0, p.dashGrace - dt);
+  p.sinceDash += dt;
   p.pulseCooldown = Math.max(0, p.pulseCooldown - dt);
   game.slowmo = Math.max(0, game.slowmo - dt);
   tickCombo(game, dt);
@@ -277,6 +332,8 @@ export function update(game, input, dt) {
 
   const aimX = input.aimX ?? p.x;
   const aimY = input.aimY ?? p.y;
+  p.aimX = aimX;
+  p.aimY = aimY;
   if (Math.hypot(aimX - p.x, aimY - p.y) > 4) p.facing = Math.atan2(aimY - p.y, aimX - p.x);
 
   const worldDt = game.slowmo > 0 ? dt * PULSE.slowmoScale : dt;
@@ -360,30 +417,83 @@ export function killEnemy(game, e, slashIndex = 1) {
 
 // ---- Dash -----------------------------------------------------------------------------------
 
-function startDash(game, input) {
+// Where a dash aimed at (aimX, aimY) goes. Pure: reads the sim, never writes it.
+// Lunge assist: if the nearest enemy inside the aim cone is between the dash distance and
+// DASH.lungeMaxDistance out, and the blade would reach it, the dash is extended along the aim line
+// to pass through it. A dash is never shortened or re-aimed.
+function planDash(game, aimX, aimY) {
   const p = game.player;
-  let [dx, dy] = unit((input.aimX ?? p.x) - p.x, (input.aimY ?? p.y) - p.y);
+  let [dx, dy] = unit(aimX - p.x, aimY - p.y);
   if (dx === 0 && dy === 0) {
     dx = Math.cos(p.facing);
     dy = Math.sin(p.facing);
   }
-  const [ex, ey] = clampToArena(p.x + dx * DASH.distance, p.y + dy * DASH.distance, PLAYER.radius);
+  let nearest = null;
+  for (const e of game.enemies) {
+    if (!e.alive) continue;
+    const vx = e.x - p.x;
+    const vy = e.y - p.y;
+    const along = vx * dx + vy * dy;
+    const len = Math.hypot(vx, vy);
+    if (along <= 0 || len === 0 || along / len < LUNGE_CONE_COS) continue;
+    if (!nearest || along < nearest.along) {
+      nearest = { e, along, lateral: Math.abs(vx * dy - vy * dx) };
+    }
+  }
+  const assisted =
+    nearest !== null &&
+    nearest.along > DASH.distance &&
+    nearest.along <= DASH.lungeMaxDistance &&
+    nearest.lateral <= nearest.e.r + DASH.bladeRadius;
+  const dist = assisted ? nearest.along : DASH.distance;
+  const [ex, ey] = clampToArena(p.x + dx * dist, p.y + dy * dist, PLAYER.radius);
+  return {
+    dirX: dx,
+    dirY: dy,
+    dist,
+    dur: DASH.duration * (dist / DASH.distance), // same speed, slightly longer when extended
+    ex,
+    ey,
+    assisted,
+  };
+}
+
+function startDash(game, input) {
+  const p = game.player;
+  const plan = planDash(game, input.aimX ?? p.x, input.aimY ?? p.y);
   p.dash.charges -= 1;
   p.dash.active = {
     t: 0,
-    dur: DASH.duration,
+    dur: plan.dur,
     sx: p.x,
     sy: p.y,
-    ex,
-    ey,
+    ex: plan.ex,
+    ey: plan.ey,
     lastX: p.x,
     lastY: p.y,
-    dirX: dx,
-    dirY: dy,
+    dirX: plan.dirX,
+    dirY: plan.dirY,
     kills: 0,
+    nearMiss: false,
+    assisted: plan.assisted,
   };
-  p.facing = Math.atan2(dy, dx);
-  game.events.push({ type: 'dash', x: p.x, y: p.y, angle: p.facing });
+  p.facing = Math.atan2(plan.dirY, plan.dirX);
+  game.events.push({ type: 'dash', x: p.x, y: p.y, angle: p.facing, assisted: plan.assisted });
+}
+
+// The end point a dash aimed at (aimX, aimY) would reach and whether it would kill anything.
+// Runs the same plan and the same kill tests as the real dash, on the current enemies; pure.
+export function dashPreview(game, aimX, aimY) {
+  const p = game.player;
+  const plan = planDash(game, aimX, aimY);
+  const kills = game.enemies.some(
+    (e) =>
+      e.alive &&
+      canBeKilled(e, plan) &&
+      (segmentHitsCircle(p.x, p.y, plan.ex, plan.ey, e.x, e.y, e.r + DASH.bladeRadius) ||
+        inFinalArc(plan.ex, plan.ey, plan.dirX, plan.dirY, e.x, e.y, DASH.finalArcRadius)),
+  );
+  return { x: plan.ex, y: plan.ey, kills, assisted: plan.assisted };
 }
 
 function stepDash(game, dt) {
@@ -397,25 +507,68 @@ function stepDash(game, dt) {
   p.x = x;
   p.y = y;
   if (d.t >= d.dur) {
-    p.dash.active = null;
-    p.vx = d.dirX * DASH.exitSpeed;
-    p.vy = d.dirY * DASH.exitSpeed;
+    finishDash(game, d);
   } else {
     p.vx = (d.ex - d.sx) / d.dur;
     p.vy = (d.ey - d.sy) / d.dur;
   }
 }
 
-// Kills every enemy the dash path crossed since the last step (segment test, not a point test).
-function sweepDash(game, d, x, y) {
+// The last step of a dash: closing arc, whiff feedback, exit grace and carried momentum.
+function finishDash(game, d) {
+  const p = game.player;
+  finalArc(game, d);
+  if (d.kills === 0 && d.nearMiss) game.events.push({ type: 'dashWhiff', x: d.ex, y: d.ey });
+  p.dash.active = null;
+  p.dashGrace = Math.max(p.dashGrace, d.kills > 0 ? DASH.killGrace : DASH.exitGrace);
+  p.sinceDash = 0;
+  p.vx = d.dirX * DASH.exitSpeed;
+  p.vy = d.dirY * DASH.exitSpeed;
+}
+
+// Enemies a dash can kill at all (some kinds only from the side or behind; see ENEMY_KINDS).
+function canBeKilled(e, d) {
+  const def = ENEMY_KINDS[e.kind];
+  return !def.dashKillable || def.dashKillable(e, d);
+}
+
+// A bullet destroyed by the dash: small score, no combo, no charge refund.
+function cutBullet(game, b) {
+  b.alive = false;
+  game.score += DASH.bulletCutScore;
+  game.events.push({ type: 'bulletCut', x: b.x, y: b.y });
+}
+
+// The closing slash arc at the dash end: kills enemies and cuts bullets within reach of the end point.
+function finalArc(game, d) {
   for (const e of game.enemies) {
-    if (!e.alive) continue;
-    const def = ENEMY_KINDS[e.kind];
-    if (def.dashKillable && !def.dashKillable(e, d)) continue;
-    if (segmentHitsCircle(d.lastX, d.lastY, x, y, e.x, e.y, e.r + PLAYER.radius)) {
+    if (!e.alive || !canBeKilled(e, d)) continue;
+    if (inFinalArc(d.ex, d.ey, d.dirX, d.dirY, e.x, e.y, DASH.finalArcRadius)) {
       d.kills += 1;
       killEnemy(game, e, d.kills);
     }
+  }
+  for (const b of game.bullets) {
+    if (!b.alive || b.owner !== 'enemy') continue;
+    if (inFinalArc(d.ex, d.ey, d.dirX, d.dirY, b.x, b.y, DASH.finalArcRadius + b.r)) cutBullet(game, b);
+  }
+}
+
+// Every step of the dash, over the path it covered since the last step (segment test, not a point test):
+// kills every enemy the blade crossed, cuts enemy bullets on the same path, and notes near misses.
+function sweepDash(game, d, x, y) {
+  for (const e of game.enemies) {
+    if (!e.alive) continue;
+    if (canBeKilled(e, d) && segmentHitsCircle(d.lastX, d.lastY, x, y, e.x, e.y, e.r + DASH.bladeRadius)) {
+      d.kills += 1;
+      killEnemy(game, e, d.kills);
+    } else if (!d.nearMiss && distToSegment(d.lastX, d.lastY, x, y, e.x, e.y) <= DASH.whiffRadius) {
+      d.nearMiss = true;
+    }
+  }
+  for (const b of game.bullets) {
+    if (!b.alive || b.owner !== 'enemy') continue;
+    if (segmentHitsCircle(d.lastX, d.lastY, x, y, b.x, b.y, b.r + DASH.bladeRadius)) cutBullet(game, b);
   }
   d.lastX = x;
   d.lastY = y;
@@ -520,6 +673,7 @@ export function spawnEnemy(game, kind, x, y) {
     hitWall: false,
     state: 'idle',
     stateT: 0,
+    telegraph: 0,
     cooldown: 0,
     shotCd: 0,
     dirX: 0,
@@ -587,12 +741,21 @@ function bulletsHitPlayer(game) {
   }
 }
 
+// Contact is fair. A non-lunging enemy hurts only when its centre gets inside its radius plus the
+// player's core (grazes are safe). Chargers hurt only during their lunge. Nothing hurts for the first
+// SPAWN.safeTime seconds of its life.
 function enemiesTouchPlayer(game) {
   const p = game.player;
   for (const e of game.enemies) {
-    if (e.alive && Math.hypot(e.x - p.x, e.y - p.y) < e.r + PLAYER.radius) {
-      damagePlayer(game, e.x, e.y);
+    if (!e.alive || e.age < SPAWN.safeTime) continue;
+    let reach;
+    if (e.kind === 'charger') {
+      if (e.state !== 'lunge') continue;
+      reach = e.r + PLAYER.radius;
+    } else {
+      reach = e.r + PLAYER.coreRadius;
     }
+    if (Math.hypot(e.x - p.x, e.y - p.y) < reach) damagePlayer(game, e.x, e.y);
   }
 }
 
@@ -612,10 +775,10 @@ function reflectedBulletsHitEnemies(game) {
   }
 }
 
-// Returns true if the hit landed. Dashing and post-hit invulnerability block damage.
+// Returns true if the hit landed. Dashing, the post-dash grace and post-hit invulnerability block damage.
 export function damagePlayer(game, fromX, fromY) {
   const p = game.player;
-  if (game.over || p.invuln > 0 || p.dash.active) return false;
+  if (game.over || p.invuln > 0 || p.dashGrace > 0 || p.dash.active) return false;
   p.hp -= 1;
   p.invuln = PLAYER.invulnAfterHit;
   const [dx, dy] = unit(p.x - fromX, p.y - fromY);

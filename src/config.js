@@ -19,6 +19,7 @@ export const ARENA = { inset: 24 };
 
 export const PLAYER = {
   radius: 14,
+  coreRadius: 8,        // contact with a non-lunging enemy hurts only inside enemy radius + this (grazes are safe)
   maxHp: 3,
   accel: 2600,          // px/s^2 while steering
   maxSpeed: 330,        // px/s, top speed while steering
@@ -33,6 +34,14 @@ export const DASH = {
   maxCharges: 3,
   rechargeTime: 0.9,    // seconds per charge
   exitSpeed: 180,       // px/s momentum carried out of a dash (placeholder)
+  bladeRadius: 26,      // px: the blade reaches this far from the path, the body is only PLAYER.radius
+  finalArcRadius: 46,   // px: the closing slash arc kills within this of the end point, forward half only
+  lungeConeDegrees: 12, // lunge assist considers enemies within this angle of the aim line
+  lungeMaxDistance: 275, // px: lunge assist extends a dash to an enemy up to this far out
+  exitGrace: 0.18,      // seconds of invulnerability after a dash that killed nothing
+  killGrace: 0.25,      // seconds of invulnerability after a dash that killed something (refreshed by each kill)
+  whiffRadius: 60,      // px: a dash that kills nothing but passes this close to an enemy emits dashWhiff
+  bulletCutScore: 5,    // points for destroying an enemy bullet with the dash (no combo, no charge refund)
 };
 
 export const PULSE = {
@@ -78,6 +87,8 @@ export const ENEMY = {
     fireRange: 620,     // only shoots inside this distance
     fireInterval: 2.2,  // seconds between shots
     firstShotDelay: 1.2,
+    windup: 0.35,       // seconds of visible aim line before a shot is released (aim locks at wind-up start)
+    postDashQuiet: 0.15, // no wind-up starts during a dash or this long after one (it simply waits)
     bulletSpeed: 240,   // px/s
     bulletRadius: 6,
     bulletLife: 4,      // seconds
@@ -108,6 +119,7 @@ export const SPAWN = {
   baseInterval: 1.6,      // seconds between spawn bursts in wave 1
   intervalStep: 0.08,     // interval shrinks by this much per wave
   minInterval: 0.35,
+  safeTime: 0.4,          // newly spawned enemies cannot hurt for this long
 };
 
 export const HIGH_SCORE_KEY = 'riptide-rush.highScore';

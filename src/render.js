@@ -12,7 +12,7 @@ import {
   ENEMY,
   RESTART_GATE,
 } from './config.js';
-import { mulberry32, multiplierFor, comboWindowFor } from './game.js';
+import { mulberry32, multiplierFor, comboWindowFor, dashPreview } from './game.js';
 
 export const PALETTE = {
   bgTop: '#050a18',
@@ -50,6 +50,7 @@ export function drawFrame(ctx, view) {
     drawWarnings(ctx, game, view.time);
     drawEnemies(ctx, game, view.alpha, view.time);
     drawBullets(ctx, game, view.alpha);
+    drawDashFeedback(ctx, game);
     drawPlayer(ctx, game, view.alpha, view.time);
   }
   drawEffects(ctx, view.effects);
@@ -176,6 +177,39 @@ function drawBullets(ctx, game, alpha) {
     ctx.fill();
     ctx.restore();
   }
+}
+
+// Afterglow after a dash, and an aim preview: a faint line and ring where the next dash would end,
+// brighter (gold) when it would kill. Reads state only.
+function drawDashFeedback(ctx, game) {
+  const p = game.player;
+  if (p.dashGrace > 0 && !p.dash.active) {
+    ctx.save();
+    ctx.globalAlpha = 0.5 * (p.dashGrace / DASH.killGrace);
+    ctx.fillStyle = PALETTE.dash;
+    ctx.shadowColor = PALETTE.dash;
+    ctx.shadowBlur = 18;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, PLAYER.radius * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  if (p.dash.active || p.dash.charges < 1 || game.over) return;
+  const pv = dashPreview(game, p.aimX, p.aimY);
+  ctx.save();
+  ctx.strokeStyle = pv.kills ? PALETTE.gold : PALETTE.dash;
+  ctx.globalAlpha = pv.kills ? 0.9 : 0.3;
+  ctx.lineWidth = pv.kills ? 3 : 2;
+  ctx.setLineDash([6, 8]);
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+  ctx.lineTo(pv.x, pv.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(pv.x, pv.y, PLAYER.radius + 6, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawPlayer(ctx, game, alpha, t) {
