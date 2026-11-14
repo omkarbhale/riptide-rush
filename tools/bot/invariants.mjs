@@ -1,7 +1,7 @@
 // Invariant checks for the headless bot harness. After every simulation step the checker looks at the
 // live game and the events that step emitted, and records any rule the sim broke. It never writes to
 // the game. A violation is a bug candidate; an observation is a fact worth reporting that is not a bug.
-import { ARENA, COMBO, DASH, LOGICAL_HEIGHT, LOGICAL_WIDTH, PICKUP, PLAYER, SIM_DT, SPAWN } from '../../src/config.js';
+import { ARENA, COMBO, DASH, LOGICAL_HEIGHT, LOGICAL_WIDTH, PICKUP, PLAYER, PULSE, SIM_DT, SPAWN } from '../../src/config.js';
 import { ENEMY_KINDS, comboWindowFor, multiplierFor } from '../../src/game.js';
 import { dashMaxCharges } from '../../src/pickups.js';
 
@@ -41,6 +41,11 @@ export const EVENT_FIELDS = {
   pickupDrop: ['x', 'y'],
   shieldBreak: ['x', 'y'],
   modifierEnd: [],
+  // Added with the balance pass (#97): telegraphs and the one-time hint.
+  spitWindup: ['x', 'y'],
+  chargerTelegraph: ['x', 'y'],
+  chargerLunge: ['x', 'y'],
+  hint: ['x', 'y', 'text'],
 };
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -58,7 +63,9 @@ export function createChecker(game) {
     hp: game.player.hp,
     wave: game.wave.number,
     waveStartedAt: game.time,
-    stallReported: false,
+    waveStarts: new Map([[game.wave.number, game.time]]), // wave -> start time, for every wave not yet cleared (#97)
+    stalled: new Set(),
+
     emptyActive: 0,
     lastHurtAt: -Infinity,
     longMines: new Set(),
@@ -156,19 +163,24 @@ export function createChecker(game) {
       if (!(w.timer > 0)) flag('NEGATIVE_TIMER', t, `breather timer ${r3(w.timer)}`);
     } else if (w.phase === 'active') {
       const pending =
-        w.queue.length > 0 ||
+        game.spawnQueue.some((q) => q.wave === w.number) ||
         game.warnings.some((wn) => wn.wave === w.number) ||
         game.enemies.some((e) => e.alive && e.wave === w.number);
       // A reflect kill can empty the wave after the spawner has already run this step, so the wave
       // clears on the next step. Only a wave that stays empty-but-active for two steps is a bug.
       st.emptyActive = pending ? 0 : st.emptyActive + 1;
       if (st.emptyActive === 2) flag('WAVE_NOT_CLEARED', t, `wave ${w.number} has nothing pending but is still active`);
-      if (!st.stallReported && t - st.waveStartedAt > WAVE_STALL_SECONDS) {
-        st.stallReported = true;
-        const alive = {};
-        for (const e of game.enemies) if (e.alive && e.wave === w.number) alive[e.kind] = (alive[e.kind] ?? 0) + 1;
-        flag('WAVE_STALL', t, `wave ${w.number} active ${r3(t - st.waveStartedAt)} s, queue ${w.queue.length}, alive ${JSON.stringify(alive)}`);
-      }
+    }
+
+    // A stall is progress that stops: the newest wave must clear (or hand over) within WAVE_STALL_SECONDS.
+    // Waves overlap (#97), so an older wave can outlive its successor; that is an observation, not a stall.
+    for (const [n, t0] of st.waveStarts) {
+      if (t - t0 <= WAVE_STALL_SECONDS || st.stalled.has(n)) continue;
+      st.stalled.add(n);
+      const alive = {};
+      for (const e of game.enemies) if (e.alive && e.wave === n) alive[e.kind] = (alive[e.kind] ?? 0) + 1;
+      if (n === w.number) flag('WAVE_STALL', t, `wave ${n} active ${r3(t - t0)} s, alive ${JSON.stringify(alive)}`);
+      else observe('WAVE_OLD_OVER_120S');
     }
 
     // Events: known type, required fields present.
@@ -202,10 +214,13 @@ export function createChecker(game) {
           if (ev.wave !== st.wave + 1) flag('WAVE_NOT_SEQUENTIAL', t, `wave ${st.wave} -> ${ev.wave}`);
           st.wave = ev.wave;
           st.waveStartedAt = t;
-          st.stallReported = false;
+          st.waveStarts.set(ev.wave, t);
           break;
         case 'waveClear':
-          if (ev.wave !== w.number) flag('WAVE_CLEAR_WRONG_WAVE', t, `cleared ${ev.wave}, current ${w.number}`);
+          st.waveStarts.delete(ev.wave);
+          st.stalled.delete(ev.wave);
+          // Waves overlap (#97), so a wave other than the newest can clear; it must be one that started.
+          if (!(ev.wave >= 1 && ev.wave <= w.number)) flag('WAVE_CLEAR_WRONG_WAVE', t, `cleared ${ev.wave}, newest ${w.number}`);
           if (game.enemies.some((e) => e.alive && e.wave === ev.wave)) flag('WAVE_CLEARED_WITH_LIVE_ENEMIES', t, `wave ${ev.wave}`);
           break;
         default:
@@ -238,6 +253,7 @@ export function createChecker(game) {
     let otherScore = 0;
     for (const ev of events) {
       if (ev.type === 'bulletCut') otherScore += DASH.bulletCutScore;
+      if (ev.type === 'perfectPulse') otherScore += PULSE.perfectBonus; // the flat award for a perfect pulse
       if (ev.type === 'heal') {
         if (!(ev.bonus >= 0)) flag('HEAL_BONUS_INVALID', t, `bonus ${ev.bonus}`);
         if (ev.bonus > 0 && ev.hp !== PLAYER.maxHp) flag('HEAL_BONUS_BELOW_MAX', t, `bonus ${ev.bonus} at hp ${ev.hp}`);

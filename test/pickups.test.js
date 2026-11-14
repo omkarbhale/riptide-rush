@@ -8,6 +8,7 @@ import {
   PLAYER,
   PICKUP,
   MODIFIER,
+  COMBO,
 } from '../src/config.js';
 import {
   createGame,
@@ -72,25 +73,27 @@ const near = (actual, expected, tol, msg) =>
 
 // ---- Drop rules -----------------------------------------------------------------------------
 
-test('heal chance is 2% plus 2% per missing hit point', () => {
+test('heal chance is the base plus a step per missing hit point', () => {
   const g = quiet();
+  const { baseChance, chancePerMissingHp } = PICKUP.heal;
   g.player.hp = 2;
-  near(healChance(g), 0.04, 1e-9, 'one missing');
+  near(healChance(g), baseChance + chancePerMissingHp, 1e-9, 'one missing');
   g.player.hp = 1;
-  near(healChance(g), 0.06, 1e-9, 'two missing');
+  near(healChance(g), baseChance + 2 * chancePerMissingHp, 1e-9, 'two missing');
 
   // Threshold check: a roll just under the chance drops a heal, a roll just over does not.
+  const chance = healChance(g);
   const hurt = quiet();
-  hurt.player.hp = 2;
-  constantRng(hurt, 0.039);
+  hurt.player.hp = 1;
+  constantRng(hurt, chance - 0.001);
   killAt(hurt, 500, 300);
-  assert.ok(hurt.pickups.items.some((it) => it.kind === 'heal'), 'roll 0.039 < 4% should drop a heal');
+  assert.ok(hurt.pickups.items.some((it) => it.kind === 'heal'), 'a roll under the chance drops a heal');
 
   const miss = quiet();
-  miss.player.hp = 2;
-  constantRng(miss, 0.041);
+  miss.player.hp = 1;
+  constantRng(miss, chance + 0.001);
   killAt(miss, 500, 300);
-  assert.ok(!miss.pickups.items.some((it) => it.kind === 'heal'), 'roll 0.041 >= 4% should not drop a heal');
+  assert.ok(!miss.pickups.items.some((it) => it.kind === 'heal'), 'a roll over the chance does not');
 });
 
 test('no heal drops at full HP, even when every roll would succeed', () => {
@@ -104,41 +107,39 @@ test('no heal drops at full HP, even when every roll would succeed', () => {
   assert.equal(g.pickups.healPity, 0, 'heal pity does not build at full HP');
 });
 
-test('heal pity guarantees a heal drop on the 40th kill while hurt', () => {
+test('heal pity guarantees a heal drop on the pityKills-th kill while hurt', () => {
   const g = quiet();
   g.player.hp = 2;
   constantRng(g, 0.99); // no chance rolls succeed, and no modifier chance either
   let firstHeal = -1;
-  for (let kill = 1; kill <= 45; kill++) {
+  for (let kill = 1; kill <= PICKUP.heal.pityKills + 5; kill++) {
     g.pickups.items = [];
-    g.combo.count = 0; // keep the combo under tier 1 so only pity can drop a heal
-    g.combo.tier = 0;
     killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
     if (firstHeal < 0 && g.pickups.items.some((it) => it.kind === 'heal')) firstHeal = kill;
   }
-  assert.equal(firstHeal, PICKUP.heal.pityKills, 'first heal drop should be on kill 40');
+  assert.equal(firstHeal, PICKUP.heal.pityKills, 'the first heal drop is on the pity kill');
 });
 
-test('reaching a new combo tier while hurt guarantees a heal drop', () => {
+test('reaching a new combo tier while hurt no longer guarantees a heal drop (#87)', () => {
   const g = quiet();
   g.player.hp = 2;
   constantRng(g, 0.99);
-  // Combo tier 1 starts at 5 kills, so kills 1 to 4 drop nothing and kill 5 must drop a heal.
-  for (let kill = 1; kill <= 4; kill++) killAt(g, 500, 300);
-  assert.equal(g.pickups.items.filter((it) => it.kind === 'heal').length, 0, 'no heal before the tier');
-  killAt(g, 500, 300);
-  assert.equal(g.combo.tier, 1, 'the fifth kill reaches tier 1');
-  assert.equal(g.pickups.items.filter((it) => it.kind === 'heal').length, 1, 'tier-up heal');
+  // Combo tier 1 now starts at 10 kills (#58). The tier-up does not force a heal.
+  for (let kill = 1; kill <= COMBO.tiers[0]; kill++) killAt(g, 500, 300);
+  assert.equal(g.combo.tier, 1, 'the tier is reached');
+  assert.equal(g.pickups.items.filter((it) => it.kind === 'heal').length, 0, 'no guaranteed heal on a tier-up');
 });
 
-test('modifier pity guarantees a modifier drop on the 30th kill', () => {
+test('modifier pity guarantees a modifier drop on the modifierPityKills-th kill', () => {
   const g = quiet();
-  constantRng(g, 0.99);
-  for (let kill = 1; kill <= 29; kill++) killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
-  assert.equal(g.pickups.items.length, 0, 'no drop before kill 30');
-  killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
-  assert.equal(g.pickups.items.length, 1, 'kill 30 drops a modifier');
-  assert.ok(MODIFIER_KINDS.includes(g.pickups.items[0].kind), 'the drop is a modifier kind');
+  constantRng(g, 0.99); // no chance rolls succeed
+  let firstDrop = -1;
+  for (let kill = 1; kill <= PICKUP.modifierPityKills + 5; kill++) {
+    g.pickups.items = [];
+    killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
+    if (firstDrop < 0 && g.pickups.items.length > 0) firstDrop = kill;
+  }
+  assert.equal(firstDrop, PICKUP.modifierPityKills, 'the first modifier drop is on the pity kill');
 });
 
 test('at most 3 pickups on the field, and never two drops within 4 s', () => {
@@ -174,24 +175,24 @@ test('a seeded run drops the same pickups every time', () => {
   assert.notEqual(run(7), run(8), 'different seeds differ');
 });
 
-test('modifier drop rate is about 5% per kill, with pity keeping gaps at 30 kills or fewer', () => {
+test('modifier drop rate is about 2% per kill, with pity keeping gaps at modifierPityKills or fewer', () => {
   const g = quiet(2024);
   let kills = 0;
   let drops = 0;
-  for (let i = 0; i < 4000; i++) {
+  for (let i = 0; i < 6000; i++) {
     g.pickups.items = [];
     killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
     kills += 1;
     drops += g.pickups.items.length;
   }
   const rate = drops / kills;
-  // Pity caps the gap at 30 kills, so the expected rate is about 6.4% (5% chance, capped at 30).
-  assert.ok(rate > 0.045 && rate < 0.085, `modifier drop rate ${rate.toFixed(4)} outside 4.5% to 8.5%`);
+  // A 1.5% chance per kill, capped by pity at 90 kills, gives about 2.0% of kills dropping a modifier (#87).
+  assert.ok(rate > 0.016 && rate < 0.025, `modifier drop rate ${rate.toFixed(4)} outside 1.6% to 2.5%`);
 });
 
 // ---- Modifiers: effect and expiry -----------------------------------------------------------
 
-test('Spark Coral adds a fourth charge and refills all charges for 8 s, then drops back to 3', () => {
+test('Spark Coral adds a fourth charge and refills all charges for its duration, then drops back to 3', () => {
   const g = quiet();
   place(g, 600, 360);
   g.player.dash.charges = 0;
@@ -201,11 +202,10 @@ test('Spark Coral adds a fourth charge and refills all charges for 8 s, then dro
   assert.equal(dashMaxCharges(g), DASH.maxCharges + MODIFIER.sparkCoral.extraCharges, 'max is 4');
   assert.equal(g.player.dash.charges, 4, 'instant full recharge');
   assert.equal(takeEvents(g, 'pickup').length, 1, 'pickup event');
-
-  seconds(g, 7.5);
-  assert.ok(g.modifiers.sparkCoral > 0, 'still active at 7.5 s');
+  seconds(g, MODIFIER.sparkCoral.duration - 0.5);
+  assert.ok(g.modifiers.sparkCoral > 0, 'still active just before expiry');
   seconds(g, 0.6);
-  assert.equal(g.modifiers.sparkCoral, undefined, 'expired after 8 s');
+  assert.equal(g.modifiers.sparkCoral, undefined, 'expired on time');
   assert.equal(g.player.dash.charges, DASH.maxCharges, 'charges clamp back to 3');
   assert.equal(takeEvents(g, 'modifierEnd').length, 1, 'modifierEnd fires once');
 });
@@ -228,15 +228,15 @@ test('Riptide Coal drains the combo timer at half speed for 6 s', () => {
   near(before - g.combo.timer, 0.5, 0.02, 'after expiry the timer runs at full speed');
 });
 
-test('Frenzy recharges dash charges 3x faster and adds 25% to dash distance, for 6 s', () => {
+test('Frenzy recharges dash charges faster and adds 25% to dash distance, for its duration', () => {
   const g = quiet();
   place(g, 300, H / 2);
   g.modifiers.frenzy = MODIFIER.frenzy.duration;
   g.player.dash.charges = 0;
   g.player.dash.recharge = 0;
-  seconds(g, 0.3); // 0.3 s x 3 = 0.9 s, one charge
-  assert.equal(g.player.dash.charges, 1, 'one charge in 0.3 s under Frenzy');
-
+  // One charge takes DASH.rechargeTime / rechargeScale under Frenzy (#87: 2x, was 3x).
+  seconds(g, DASH.rechargeTime / MODIFIER.frenzy.rechargeScale + 0.01);
+  assert.equal(g.player.dash.charges, 1, 'one charge after the faster recharge');
   // The dash ends after 15 steps (0.12 s). Measure there, before exit momentum carries Rip on.
   const h = quiet();
   place(h, 300, H / 2);
@@ -244,7 +244,6 @@ test('Frenzy recharges dash charges 3x faster and adds 25% to dash distance, for
   finishDash(h);
   assert.equal(h.player.dash.active, null, 'baseline dash finished');
   near(h.player.x - 300, DASH.distance, 1e-6, 'baseline dash distance');
-
   const f = quiet();
   place(f, 300, H / 2);
   f.modifiers.frenzy = MODIFIER.frenzy.duration;
@@ -252,8 +251,7 @@ test('Frenzy recharges dash charges 3x faster and adds 25% to dash distance, for
   finishDash(f);
   assert.equal(f.player.dash.active, null, 'Frenzy dash finished');
   near(f.player.x - 300, DASH.distance * (1 + MODIFIER.frenzy.dashDistanceBonus), 1e-6, 'Frenzy dash distance');
-
-  seconds(f, 6);
+  seconds(f, MODIFIER.frenzy.duration);
   assert.equal(f.modifiers.frenzy, undefined, 'Frenzy expired');
 });
 
@@ -408,30 +406,20 @@ function clearWave(g) {
   update(g, NONE, SIM_DT);
 }
 
-test('a wave cleared with no HP lost restores 1 HP; a wave that lost HP does not', () => {
+test('a cleared wave no longer restores HP by itself: recovery is earned from heal orbs (#87)', () => {
   const g = createGame(1);
   g.player.hp = 2;
   clearWave(g);
-  assert.equal(g.player.hp, 3, 'flawless clear heals');
-  const heal = takeEvents(g, 'heal').find((ev) => ev.source === 'flawless');
-  assert.ok(heal, 'a flawless heal event fires');
-  assert.equal(heal.bonus, 0);
-
-  const h = createGame(2);
-  h.player.hp = 2;
-  place(h, 600, 360);
-  damagePlayer(h, 560, 360);
-  assert.equal(h.player.hp, 1, 'the hit lands');
-  h.invuln = 0;
-  clearWave(h);
-  assert.equal(h.player.hp, 1, 'a wave that lost HP does not heal');
+  assert.equal(g.player.hp, 2, 'a flawless clear does not heal');
+  assert.equal(takeEvents(g, 'heal').filter((ev) => ev.source === 'flawless').length, 0, 'no flawless heal');
 });
 
-test('a flawless clear at full HP converts to bonus score', () => {
+test('a flawless clear at full HP adds no bonus score (#87)', () => {
   const g = createGame(1);
+  const before = g.score;
   clearWave(g);
-  assert.equal(g.score, PICKUP.overflowScore, 'bonus score at full HP');
-  assert.equal(takeEvents(g, 'heal').length, 1);
+  assert.equal(g.score, before, 'no bonus score from a clear');
+  assert.equal(takeEvents(g, 'heal').length, 0, 'no heal event');
 });
 
 test('healPlayer restores up to max and never above it', () => {

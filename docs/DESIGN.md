@@ -95,7 +95,7 @@ The beginner's game uses the same rules. The only difference is how many dashes 
 | Input buffer | 120 ms | #1 |
 | Zero-length aim | If the cursor is on Rip, dash along the last movement direction; if none, dash right | proposed |
 | Arena wall | Dash stops at the wall; no bounce | proposed |
-| Shellback front contact | Dash cancels at contact, Rip bounces back 40 px over 0.1 s, no damage; the charge is spent | proposed |
+| Shellback front contact | Dash cancels at contact. Rip bounces back 80 px over 0.4 s, invulnerable, no damage. The dash's charge is refunded, so the lesson costs tempo, not charges or health (#85, balance pass) | proposed; bounce set in #97 |
 | Mine contact | Dash through a mine defuses it (see §3.7) | #1 |
 
 ### 3.4 Pulse
@@ -155,7 +155,7 @@ Damage sources: enemy bullets (1), Drifter contact (1, Drifter dies), Charger lu
 | Base score: Mine defuse | 75 | proposed |
 | Multi-kill bonus | `50 × (n − 1) × multiplier` where `n` = kills in one dash, multiplier = value after the last kill of that dash | #1 (existence) / formula proposed |
 | Perfect pulse bonus | +150 flat | proposed |
-| Tier thresholds | cyan 0–9, green 10–19, gold 20–29, magenta 30–39, white 40+ | #1 (colors) / thresholds proposed |
+| Tier thresholds | cyan 0–9, green 10–19, gold 20–29, magenta 30–39, white 40+ (`COMBO.tiers` = 10/20/30/40, as §3.10 says; #58) | #1 (colors) / thresholds proposed |
 | Multiplier cap | ×10 at combo 45 | #1 |
 
 ### 3.8 Hit feel
@@ -185,26 +185,26 @@ Recovery and power are earned by chaining, and they pull Rip toward the fight. N
 
 | Parameter | Value |
 |---|---|
-| Chance per kill | 2% + 2% per missing hit point (4% at 2 HP, 6% at 1 HP) |
-| Combo tier guarantee | Reaching a new combo tier while hurt guarantees a heal drop |
-| Pity | Guaranteed on the 40th kill while hurt without a heal drop |
+| Chance per kill | 0.5% + 0.5% per missing hit point (1% at 2 HP, 1.5% at 1 HP). Rarer than the first draft on purpose: recovery is earned, not automatic (#87, balance pass) |
+| Combo tier guarantee | None. A tier-up while hurt no longer forces a heal (#87) |
+| Pity | Guaranteed on the 150th kill while hurt without a heal drop |
 | Collect | Restores 1 HP |
-| Flawless wave | A wave that clears (`waveClear`) with no HP lost restores 1 HP (`source: 'flawless'`, no orb) |
+| Flawless wave | None. A cleared wave with no HP lost restores nothing (#87) |
 | Full HP | A heal that would restore HP converts to bonus score: 200 × multiplier. Never wasted |
 
 **Modifier drops.** Each lasts a few seconds, shows a countdown bar in the HUD (one row per modifier, under the combo), and stacks by refreshing its timer.
 
 | Modifier | Colour / shape | Effect | Duration |
 |---|---|---|---|
-| Spark Coral | cyan / four-point spark | +1 max dash charge (4) and instant full recharge | 8 s |
-| Riptide Coal | gold / hexagon | Combo timer drains at half speed | 6 s |
-| Shield Scale | white / shield | Absorbs the next hit, then a 0.25 s bounce grace and a knockback so a touching enemy cannot drain HP next frame | 6 s or until used |
-| Frenzy | magenta / chevron | Dash charges recharge 3× faster; dash distance +25% | 6 s |
-| Undertow | violet / swirl | Every kill releases a 90 px shockwave that kills adjacent enemies; chain kills count for score and combo | 5 s |
+| Spark Coral | cyan / four-point spark | +1 max dash charge (4) and instant full recharge | 5 s (was 8) |
+| Riptide Coal | gold / hexagon | Combo timer drains at half speed | 5 s (was 6) |
+| Shield Scale | white / shield | Absorbs the next hit, then a 0.25 s bounce grace and a knockback so a touching enemy cannot drain HP next frame | 5 s or until used (was 6) |
+| Frenzy | magenta / chevron | Dash charges recharge 2× faster (was 3×); dash distance +25% | 4 s (was 6) |
+| Undertow | violet / swirl | Every kill releases a 90 px shockwave that kills adjacent enemies; chain kills count for score and combo | 4 s (was 5) |
 
 Shield Scale is drawn as a silver aura around Rip with a ring that empties as the shield runs out.
 
-**Drop rules (shared by heal and modifier drops).** At most one drop per kill, never two drops within 4 s, at most 3 pickups on the field. Modifier drops: 5% per kill, guaranteed on the 30th kill without one. Drops appear at the kill point with a small outward pop.
+**Drop rules (shared by heal and modifier drops).** At most one drop per kill, never two drops within 4 s, at most 3 pickups on the field. Modifier drops: 1.5% per kill, guaranteed on the 90th kill without one (was 5%, pity 30; balance pass, #87). Drops appear at the kill point with a small outward pop.
 
 **Pickup behaviour.** Collected by touching. Inside 120 px they are pulled toward Rip at 420 px/s. A dash path passing within 60 px collects them, so chaining sweeps them up. They last 7 s and blink for the final 2 s, then despawn.
 
@@ -432,7 +432,9 @@ The combo timer resets on each kill. The multi-kill bonus uses the multiplier af
 
 ## 7. Difficulty curve
 
-### 7.1 Wave composition (proposed)
+### 7.1 Wave composition (first draft, superseded)
+
+Superseded by the balance pass (#97). The source of truth is `WAVE_TABLE` and `planWave` in `src/waves.js`; see §7.4. The formulas and table below are kept as the first draft.
 
 Formulas, with `n` = wave number starting at 1:
 
@@ -462,12 +464,12 @@ Resulting counts, waves 1–10:
 
 Splitter counts exclude their minis. Minis are not counted toward wave size but count toward the 120 entity cap.
 
-### 7.2 Pacing and scaling
+### 7.2 Pacing and scaling (first draft; the balance pass changes the numbers, see §7.4)
 
 - **Spawn timing.** Each wave spawns over 6 s, in groups at random arena-edge points at least 200 px from Rip. Each spawn is preceded by a 0.8 s warning.
 - **Wave end.** A wave ends when all its enemies are dead, or after 25 s; the next intermission then starts. Enemies still alive at the timeout keep acting.
 - **Intermission.** 2.0 s between a wave ending and the next `WAVE_INTRO`.
-- **Speed scaling.** Enemy speeds are multiplied by `1 + 0.02 × (n − 1)`, capped at ×1.4 (reached at wave 21).
+- **Speed scaling.** Enemy speeds are multiplied by `1 + 0.02 × (n − 1)`, capped at ×1.4 (reached at wave 21). Superseded: see §7.4.
 - **Combo timer shrink.** Above combo 20, the timer shrinks as in §3.7, reaching 2.0 s at combo 70.
 - **Expected progression.** Waves 1–3 teach Drifters, Spitters, Chargers, and mines. Waves 4–6 add Shellbacks and Splitters. Waves 7 and onward mix all six types with more density. Target: a competent player reaches wave 8 within 2–3 minutes; an expert can run past wave 15 without losing a combo.
 
@@ -531,3 +533,25 @@ Each open question below has a matching GitHub issue labelled `design` with a co
 - Scoring formula (§6) has three worked examples.
 - Difficulty table (§7.1) was computed by hand from the §7.1 formulas and cross-checked: each row's total matches the sum of its enemy counts.
 - Beginner and expert walkthroughs (§2) use only rules defined in §3–§4 (combo timer, hit does not reset combo, charge refund, mine rules).
+
+### 7.4 Balance pass: schools, overlap, pressure, the ramp (#97)
+
+The balance pass made the field denser and waves overlap, so a dash can kill several enemies and the difficulty keeps rising. It was tuned against the headless bot harness (`tools/bot/`, report in `docs/playtests/003-balance-pass.md`). Source: `src/waves.js`, `src/game.js`, `src/config.js`.
+
+**Schools.** Drifters arrive in schools of 4–8 that swim in a formation: a line across the front, a wedge led by one member, or a ring. A school's anchor swims toward Rip at 0.8× chase speed and faces her; members hold their slot and chase Rip directly once she is within 120 px. Every other kind comes alone. The school cap grows by one every 4 waves, from 4 at wave 1 to 8 from wave 17. Splitter minis keep the split ring. A dash through a school's line kills several at once.
+
+**Overlapping waves.** A wave that is not a release wave hands over to the next wave when it is down to 15% of its count (at least one enemy), or after 14 s, so stragglers keep fighting while the next wave arrives. Release waves (3, 5, 9, 11, 15, 18) run to a clear and keep their 2.5 s breather, but a release wave never runs longer than 24 s.
+
+**Stalls (#83).** A lone enemy (the last of its wave, nothing else pending) turns aggressive after 8 s: it moves 1.6× faster and a Spitter fires at once or a Charger lunges at its next chance. An idle mine arms itself after 12 s.
+
+**Pressure.** Enemy movement speeds grow 3.5% per wave past wave 1 with no cap (`SPAWN.speedPerWave`). Waves past 20 are budgeted at 60 + 9k points, with no cap, and weighted toward Spitters, Chargers and Shellbacks.
+
+**Beginner ramp (#84).** Spitter bullets start at 150 px/s and speed up by 6 px/s per wave, to 260. The first shot waits 2.0 s. The first Spitter is held until Drifter schools are cleared (no more than two Drifters left and none queued), and no longer than 12 s. The first Spitter wind-up shows a one-time hint, "DASH THROUGH BULLETS - OR RIGHT-CLICK TO REFLECT"; the first Shellback shows "ARMORED FRONT - STRIKE FROM BEHIND OR PULSE IT". Each is an event (`hint {text, x, y}`), once per run.
+
+**Deflect (#85).** A dash that deflects off a Shellback's front bounces Rip 80 px back over 0.4 s, invulnerable, and refunds the charge the dash spent.
+
+**Spawn clamp (#82).** Spawns and minis are clamped to `ARENA.inset + radius` when they appear, so no enemy starts outside the arena.
+
+**Wave 14 (#88).** Four Chargers (was two).
+
+**Combo tiers (#58).** 10/20/30/40, as in §3.10.

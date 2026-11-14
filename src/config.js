@@ -42,8 +42,8 @@ export const DASH = {
   killGrace: 0.25,      // seconds of invulnerability after a dash that killed something (refreshed by each kill)
   whiffRadius: 60,      // px: a dash that kills nothing but passes this close to an enemy emits dashWhiff
   bulletCutScore: 5,    // points for destroying an enemy bullet with the dash (no combo, no charge refund)
-  bounceDistance: 40,   // px Rip is pushed back when a dash runs into a Shellback's armour
-  bounceTime: 0.1,      // seconds of bounce (invulnerable)
+  bounceDistance: 80,   // px Rip is pushed back when a dash runs into a Shellback's armour (#85: readable bounce)
+  bounceTime: 0.4,      // seconds of bounce, invulnerable; the dash's charge is refunded (#85)
 };
 
 export const PULSE = {
@@ -63,7 +63,7 @@ export const COMBO = {
   windowMin: 1.6,            // the timer shrinks linearly with the multiplier and floors here at x10 (issue #11)
   multiplierStep: 5,         // multiplier = 1 + floor(combo / multiplierStep)
   multiplierCap: 10,
-  tiers: [5, 10, 20, 30],    // combo counts where the colour tier steps up (placeholder)
+  tiers: [10, 20, 30, 40],   // combo counts where the colour tier steps up: cyan 0-9, green 10-19, gold 20-29, magenta 30-39, white 40+ (DESIGN §3.7, #58)
   multiBonus: 25,            // bonus points per kill after the first in one slash, before multiplier (placeholder)
 };
 
@@ -84,6 +84,9 @@ export const ENEMY = {
     points: 10,
     speed: 95,          // px/s chase speed
     steer: 3,           // velocity blend rate per second (placeholder)
+    schoolSpeed: 0.8,   // a school's anchor swims at this fraction of chase speed (#97: schools)
+    slotSpeed: 1.3,     // a member closing on its formation slot may move at this multiple of chase speed
+    chaseRange: 120,    // px: inside this a member breaks formation and chases Rip directly
   },
   spitter: {
     radius: 16,
@@ -93,11 +96,13 @@ export const ENEMY = {
     maxRange: 320,      // closes in beyond this distance
     fireRange: 620,     // only shoots inside this distance
     fireInterval: 2.2,  // seconds between shots
-    firstShotDelay: 1.2,
+    firstShotDelay: 2.0,  // first shot waits this long after the wind-up of the first spawn (#97 beginner ramp)
     windup: 0.35,       // seconds of visible aim line before a shot is released (aim locks at wind-up start)
     aimLength: 300,     // px of the wind-up aim line drawn along the locked direction
     postDashQuiet: 0.15, // no wind-up starts during a dash or this long after one (it simply waits)
-    bulletSpeed: 240,   // px/s
+    bulletSpeed: 150,   // px/s at wave 2; bullets speed up by bulletSpeedPerWave each wave, up to bulletSpeedMax
+    bulletSpeedPerWave: 6,
+    bulletSpeedMax: 260,
     bulletRadius: 6,
     bulletLife: 4,      // seconds
   },
@@ -141,25 +146,37 @@ export const ENEMY = {
     radius: 12,
     points: 8,              // design 75, the defuse bonus
     armRange: 130,          // Rip this close arms the mine
+    selfArmTime: 12,        // an idle mine arms itself after this long, so it cannot stall a wave (#83)
     fuse: 0.8,              // seconds from arming to detonation
     blastRadius: 90,        // px; hurts Rip and kills other enemies inside it
   },
 };
 
+// Lone enemies and waves. A lone enemy (the last of its wave, with nothing else pending) turns aggressive
+// after AGGRO.loneTime, so a stalled fight is forced (#83).
+export const AGGRO = {
+  loneTime: 8,            // seconds an enemy must be the last of its wave before it turns aggressive
+  speedMul: 1.6,          // movement speed multiple once aggressive
+};
+
 export const SPAWN = {
   warning: 0.9,           // seconds of spawn-warning marker before an enemy appears
-  edgeInset: 40,          // spawns sit on the arena edge inset this far in
   minDistFromPlayer: 280, // never spawn this close to the player
-  maxAlive: 45,           // enemies plus warnings
-  waveDuration: 14,       // seconds per wave (placeholder)
-  baseInterval: 1.6,      // seconds between spawn bursts in wave 1
-  intervalStep: 0.08,     // interval shrinks by this much per wave
-  minInterval: 0.35,
   safeTime: 0.4,          // newly spawned enemies cannot hurt for this long
   maxEntities: 200,       // live enemies + warnings + bullets; the wave script waits for room
-  breather: 2.5,          // seconds between a wave clearing and the next one starting
-  groupLeadIn: 0.6,       // seconds from a wave starting to its first spawn group
+  breather: 2.5,          // seconds between a release wave clearing and the next one starting
+  groupLeadIn: 0.6,       // seconds from a wave starting to its first spawn
   drifterOnlyUntil: 30,   // run time (s) during which every spawn is a Drifter, to teach chaining
+  stragglers: 0.15,       // the next wave starts when the current one is down to this fraction of its count
+  waveTimeLimit: 14,      // seconds after which the next wave starts even if the current one has many left
+  releaseTimeLimit: 24,   // a release wave waits for a clear, but never longer than this: progress cannot stop (#83)
+  spitterGateDrifters: 2, // the first Spitter is released once this many Drifters or fewer are alive (#84)
+  spitterGateTime: 12,    // ...and never waits longer than this many seconds after it first became due
+  speedPerWave: 0.035,    // enemy movement speed grows by this fraction per wave, past wave 1, with no cap (#97)
+  schoolMin: 4,           // drifter schools hold at least this many (a smaller remainder is a school of its own)
+  schoolMax: 8,           // ...and at most this many, the upper bound for the school cap
+  schoolCapGrowEvery: 4,  // the school cap grows by one every this many waves, from 4 at wave 1 to schoolMax
+  schoolSpacing: 20,      // px between neighbours in a school's formation (tight: a dash through a school kills several)
 };
 
 // Health recovery and modifier drops (#54). Logic lives in src/pickups.js.
@@ -176,13 +193,13 @@ export const PICKUP = {
   dropSpacing: 4,         // seconds between any two drops
   overflowScore: 200,     // base points when a heal lands at full HP (x multiplier)
   heal: {
-    baseChance: 0.02,     // per kill while hurt
-    chancePerMissingHp: 0.02,
-    pityKills: 40,        // guaranteed after this many hurt kills without one
+    baseChance: 0.005,    // per kill while hurt (#87: was 2%; heal orbs are rare, so recovery is earned)
+    chancePerMissingHp: 0.005, // was 2% per missing hit point
+    pityKills: 150,       // guaranteed after this many hurt kills without one (was 40)
     restore: 1,           // HP restored by one heal orb or a flawless wave
   },
-  modifierChance: 0.05,   // per kill
-  modifierPityKills: 30,  // guaranteed after this many kills without a modifier drop
+  modifierChance: 0.015,  // per kill (#87: was 5%; recovery and power-ups are earned, not every few seconds)
+  modifierPityKills: 90,  // guaranteed after this many kills without a modifier drop
   shield: {
     grace: 0.25,           // seconds of no contact damage after a shield absorbs a hit
     bounceKnockback: 0.6, // fraction of PLAYER.hitKnockback applied when a shield absorbs
@@ -192,11 +209,11 @@ export const PICKUP = {
 
 // Modifier durations and effects, one entry per kind. Stacking refreshes the timer.
 export const MODIFIER = {
-  sparkCoral: { duration: 8, extraCharges: 1 },           // +1 max dash charge, instant full recharge
-  riptideCoal: { duration: 6, comboDrainScale: 0.5 },     // combo timer drains at half speed
-  shieldScale: { duration: 6 },                           // absorbs the next hit
-  frenzy: { duration: 6, rechargeScale: 3, dashDistanceBonus: 0.25 },
-  undertow: { duration: 5 },                              // kills release a shockwave
+  sparkCoral: { duration: 5, extraCharges: 1 },           // +1 max dash charge, instant full recharge (was 8 s)
+  riptideCoal: { duration: 5, comboDrainScale: 0.5 },     // combo timer drains at half speed (was 6 s)
+  shieldScale: { duration: 5 },                           // absorbs the next hit (was 6 s)
+  frenzy: { duration: 4, rechargeScale: 2, dashDistanceBonus: 0.25 }, // was 6 s at 3x recharge: too much sustain (#87)
+  undertow: { duration: 4 },                              // kills release a shockwave (was 5 s)
 };
 
 export const HIGH_SCORE_KEY = 'riptide-rush.highScore';

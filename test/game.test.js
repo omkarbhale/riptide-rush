@@ -4,6 +4,8 @@ import {
   LOGICAL_WIDTH as W,
   LOGICAL_HEIGHT as H,
   SIM_DT,
+  ARENA,
+  AGGRO,
   DASH,
   PULSE,
   PLAYER,
@@ -26,6 +28,9 @@ import {
   mulberry32,
   ENEMY_KINDS,
   dashPreview,
+  HINT_TEXT,
+  speedScaleFor,
+  bulletSpeedFor,
 } from '../src/game.js';
 import { SCRIPTED_KINDS } from '../src/waves.js';
 import { createActionBuffer } from '../src/input.js';
@@ -166,13 +171,14 @@ test('combo timer is 2.5 s at x1, shrinks linearly with the multiplier, and floo
   assert.equal(comboWindowFor(500), COMBO.windowMin, 'the floor holds above x10');
 });
 
-test('combo tiers step up at the configured counts', () => {
+test('combo tiers step up at the configured counts: cyan 0-9, green 10-19, gold 20-29, magenta 30-39, white 40+ (#58)', () => {
+  assert.deepEqual(COMBO.tiers, [10, 20, 30, 40]);
   assert.equal(tierFor(0), 0);
-  assert.equal(tierFor(4), 0);
-  assert.equal(tierFor(5), 1);
-  assert.equal(tierFor(10), 2);
-  assert.equal(tierFor(20), 3);
-  assert.equal(tierFor(30), 4);
+  assert.equal(tierFor(9), 0);
+  assert.equal(tierFor(10), 1);
+  assert.equal(tierFor(20), 2);
+  assert.equal(tierFor(30), 3);
+  assert.equal(tierFor(40), 4);
 });
 
 test('kill score is base x multiplier of the combo after the kill', () => {
@@ -181,7 +187,7 @@ test('kill score is base x multiplier of the combo after the kill', () => {
   // Kills 1-4 are at x1 (4 x 10); kill 5 makes combo 5, so x2 (20).
   assert.equal(g.combo.count, 5);
   assert.equal(g.score, 60);
-  assert.equal(g.combo.tier, 1, 'five kills reach colour tier 1');
+  assert.equal(g.combo.tier, 0, 'five kills are still cyan; tier 1 starts at ten (#58)');
 });
 
 test('a multi-kill bonus applies to the second and later kills in one slash, and the kill event carries it', () => {
@@ -413,7 +419,7 @@ test('a dash into the shellback front arc deflects: no kill, no damage, Rip boun
   assert.equal(e.alive, true, 'the shellback survives');
   assert.equal(g.kills, 0);
   assert.equal(g.player.hp, PLAYER.maxHp, 'no damage from the bounce');
-  assert.equal(g.player.dash.charges, 2, 'the dash spent its charge and got no refund');
+  assert.equal(g.player.dash.charges, 3, 'the dash spent its charge and the deflect refunds it (#85)');
   assert.equal(g.player.dash.active, null, 'the dash was cancelled');
   const gap = Math.hypot(g.player.x - e.x, g.player.y - e.y);
   assert.ok(gap > e.r + PLAYER.radius, 'Rip ends outside the armour');
@@ -597,39 +603,58 @@ test('the first 30 s are Drifters only, even for a wave whose script has other k
   assert.deepEqual([...seen], ['drifter']);
 });
 
-test('after 30 s the script’s kinds appear, and warnings sit on the arena edge', () => {
+test('after 30 s the script’s kinds appear, and every warning sits inside the arena clamp (#82)', () => {
   const g = createGame(7, { startWave: 8 });
   g.time = SPAWN.drifterOnlyUntil;
+  g.spitterReleased = true; // the first-Spitter gate has its own tests
   place(g, W / 2, H / 2);
   const seen = new Set();
   for (let i = 0; i < 2 * 120; i++) {
     update(g, NONE, SIM_DT);
     for (const wn of g.warnings) {
       seen.add(wn.kind);
-      const edge = wn.x <= 41 || wn.x >= W - 41 || wn.y <= 41 || wn.y >= H - 41;
-      assert.ok(edge, 'warning marker sits on the arena edge');
+      const r = ENEMY_KINDS[wn.kind].radius;
+      const inside = wn.x >= ARENA.inset + r && wn.x <= W - ARENA.inset - r && wn.y >= ARENA.inset + r && wn.y <= H - ARENA.inset - r;
+      assert.ok(inside, `${wn.kind} warning at ${wn.x}, ${wn.y} is outside its clamp`);
     }
   }
   assert.ok(seen.has('spitter') && seen.has('shellback'), `kinds seen: ${[...seen]}`);
 });
 
-test('a wave clears once its queue is empty and its enemies are dead, then a breather, then the next wave', () => {
+// A one-enemy non-release wave is already down to its stragglers, so wave 2 starts at once, with no breather.
+test('a one-enemy non-release wave hands over to wave 2 at once (#97)', () => {
   const g = createGame(5);
-  g.wave.queue = [];
+  g.spawnQueue = [];
   g.warnings.length = 0;
   g.enemies.length = 0;
-  const d = spawnEnemy(g, 'drifter', 200, 200);
-  assert.equal(kindOf(collect(g, 0.1), 'waveClear').length, 0, 'not clear while an enemy lives');
-  killEnemy(g, d, 1);
-  const cleared = kindOf(collect(g, 0.05), 'waveClear');
-  assert.deepEqual(cleared.map((ev) => ev.wave), [1]);
-  assert.equal(g.wave.phase, 'breather');
-
-  const next = collect(g, SPAWN.breather + 0.05);
-  assert.ok(next.some((ev) => ev.type === 'waveStart' && ev.wave === 2), 'wave 2 starts after the breather');
+  g.wave.total = 1;
+  g.liveWaves[0].total = 1;
+  drainEvents(g);
+  spawnEnemy(g, 'drifter', 200, 200);
+  const events = collect(g, 0.05);
+  assert.ok(kindOf(events, 'waveStart').some((ev) => ev.wave === 2), 'wave 2 starts at once');
   assert.equal(g.wave.number, 2);
   assert.equal(g.wave.phase, 'active');
-  assert.ok(g.wave.queue.length > 0, 'wave 2 has a spawn queue');
+  assert.ok(g.spawnQueue.length > 0, 'wave 2 has schools queued');
+});
+
+// Release waves keep their breather: the next wave waits for the clear, then SPAWN.breather.
+test('a release wave clears, then a breather, then the next wave', () => {
+  const g = createGame(5, { startWave: 3 }); // wave 3 is a release wave
+  g.spawnQueue = [];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.wave.total = 1;
+  g.liveWaves.find((r) => r.number === 3).total = 1;
+  const d = spawnEnemy(g, 'drifter', 200, 200);
+  killEnemy(g, d, 1);
+  collect(g, 0.05);
+  assert.equal(g.wave.phase, 'breather', 'a release wave takes its breather');
+  assert.equal(g.wave.number, 3);
+  const next = collect(g, SPAWN.breather + 0.05);
+  assert.ok(next.some((ev) => ev.type === 'waveStart' && ev.wave === 4), 'wave 4 starts after the breather');
+  assert.equal(g.wave.number, 4);
+  assert.equal(g.wave.phase, 'active');
 });
 
 test('the wave script waits while the entity cap is full, then carries on', () => {
@@ -698,6 +723,8 @@ const KNOWN = new Set([
   'pickupDrop', 'pickup', 'modifierEnd', 'heal', 'shieldBreak',
   // Telegraphs (#68, #69): the wind-up and the charger's warning and lunge are events, so feedback can sound them.
   'spitWindup', 'chargerTelegraph', 'chargerLunge',
+  // The one-time hint (#84).
+  'hint',
 ]);
 
 const finite = (g) => {
@@ -1063,3 +1090,209 @@ test('aim preview: dashPreview gives the end point (lunge-assisted), predicts ki
   assert.equal(none.kills, false, 'preview says no kill when the dash would miss');
 });
 
+// ---- The balance pass (#97): schools, overlapping waves, pressure, the ramp and the deflect bounce ----
+
+// A school enters together: one school object, distinct formation slots, all inside the arena clamp.
+test('a Drifter school enters as one formation: a shared school, distinct slots, inside the clamp (#97, #82)', () => {
+  const g = createGame(3);
+  g.spawnQueue = [{ wave: 1, kind: 'drifter', size: 6, gap: 1 }];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.nextSpawnAt = 0;
+  update(g, NONE, SIM_DT);
+  assert.equal(g.warnings.length, 6, 'all six members get a warning on the same step');
+  const schools = new Set(g.warnings.map((wn) => wn.slot.school));
+  assert.equal(schools.size, 1, 'one school');
+  const slots = new Set(g.warnings.map((wn) => `${wn.slot.x.toFixed(3)},${wn.slot.y.toFixed(3)}`));
+  assert.equal(slots.size, 6, 'every member has its own slot');
+  for (const wn of g.warnings) {
+    const r = ENEMY.drifter.radius;
+    assert.ok(wn.x >= ARENA.inset + r && wn.x <= W - ARENA.inset - r && wn.y >= ARENA.inset + r && wn.y <= H - ARENA.inset - r);
+  }
+});
+
+test('a school swims toward Rip and keeps its shape: members stay within two spacings of their anchor', () => {
+  const g = createGame(4);
+  g.spawnQueue = [{ wave: 1, kind: 'drifter', size: 5, gap: 1 }];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.nextSpawnAt = 0;
+  update(g, NONE, SIM_DT);
+  seconds(g, 1.5);
+  const school = g.schools[0];
+  assert.ok(school, 'the school is tracked');
+  for (const e of g.enemies.filter((x) => x.alive)) {
+    assert.ok(e.school === school, 'every member belongs to the school');
+    const d = Math.hypot(e.x - school.x, e.y - school.y);
+    assert.ok(d < 6 * SPAWN.schoolSpacing, `member ${d.toFixed(0)} px from the anchor`);
+  }
+});
+
+// Overlap: the next wave starts when the current one is down to 15% of its count, while stragglers fight on.
+test('the next wave starts when the current one is down to 15% of its count, with stragglers still alive (#97)', () => {
+  const g = createGame(5);
+  g.spawnQueue = [];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.wave.total = 10;
+  g.liveWaves[0].total = 10;
+  drainEvents(g);
+  const enemies = Array.from({ length: 10 }, (_, i) => spawnEnemy(g, 'drifter', 200 + i * 40, 300, 1));
+  for (let i = 0; i < 7; i++) killEnemy(g, enemies[i], 1);
+  let events = collect(g, 0.05);
+  assert.ok(!kindOf(events, 'waveStart').length, 'seven left of ten: wave 2 waits');
+  killEnemy(g, enemies[7], 1);
+  events = collect(g, 0.05);
+  assert.ok(kindOf(events, 'waveStart').some((ev) => ev.wave === 2), 'two left (15%): wave 2 starts');
+  assert.equal(g.enemies.filter((e) => e.alive && e.wave === 1).length, 2, 'the stragglers keep fighting');
+});
+
+test('a wave that has not thinned out is handed over after SPAWN.waveTimeLimit regardless (#97)', () => {
+  const g = createGame(6);
+  g.spawnQueue = [];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.wave.total = 50;
+  g.wave.startedAt = g.time - SPAWN.waveTimeLimit - 0.05;
+  for (let i = 0; i < 50; i++) spawnEnemy(g, 'drifter', 200 + (i % 10) * 60, 200 + Math.floor(i / 10) * 60, 1);
+  const events = collect(g, 0.05);
+  assert.ok(kindOf(events, 'waveStart').some((ev) => ev.wave === 2), 'the time limit starts wave 2');
+});
+
+test('a release wave is never handed over early, but a release wave past SPAWN.releaseTimeLimit is (#83)', () => {
+  const early = createGame(7, { startWave: 3 });
+  early.spawnQueue = [];
+  early.warnings.length = 0;
+  early.enemies.length = 0;
+  early.wave.total = 10;
+  spawnEnemy(early, 'drifter', 200, 200, 3);
+  collect(early, 0.05);
+  assert.equal(early.wave.number, 3, 'a release wave waits for its clear');
+
+  const late = createGame(7, { startWave: 3 });
+  late.spawnQueue = [];
+  late.warnings.length = 0;
+  late.enemies.length = 0;
+  late.wave.total = 10;
+  late.wave.startedAt = late.time - SPAWN.releaseTimeLimit - 0.05;
+  spawnEnemy(late, 'drifter', 200, 200, 3);
+  collect(late, 0.05);
+  assert.equal(late.wave.number, 4, 'the time limit ends the release wave, so progress cannot stop');
+});
+
+// Lone enemies turn aggressive, so a stalled fight is forced (#83).
+test('a lone enemy, the last of its wave with nothing pending, turns aggressive after AGGRO.loneTime', () => {
+  const g = createGame(8);
+  g.spawnQueue = [];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.liveWaves = [{ number: 1, total: 1, release: false }];
+  g.wave.total = 1;
+  g.wave.startedAt = g.time;
+  const e = spawnEnemy(g, 'shellback', W - 200, H / 2, 1);
+  seconds(g, AGGRO.loneTime - 0.5);
+  assert.equal(e.aggro, false, 'not yet aggressive');
+  seconds(g, 0.6);
+  assert.equal(e.aggro, true, 'aggressive once it has been lone for loneTime');
+});
+
+test('an idle mine arms itself after ENEMY.mine.selfArmTime, even with Rip far away (#83)', () => {
+  const g = quiet(9);
+  place(g, 120, 120);
+  const mine = spawnEnemy(g, 'mine', W - 200, H - 200, 1);
+  const events = collect(g, ENEMY.mine.selfArmTime + 0.1);
+  assert.equal(mine.state, 'armed', 'the mine armed itself');
+  assert.ok(kindOf(events, 'mineArm').length >= 1, 'a mineArm event fired');
+});
+
+test('the first Spitter waits until the Drifter schools are cleared, but never waits past spitterGateTime (#84)', () => {
+  const g = createGame(10);
+  g.spawnQueue = [{ wave: 2, kind: 'spitter', size: 1, gap: 1 }];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.liveWaves = [{ number: 2, total: 1, release: true }];
+  g.wave.number = 2;
+  g.wave.total = 1;
+  g.wave.release = true; // a release wave does not hand over, so the queue is only the gate's business
+  g.wave.startedAt = g.time = SPAWN.drifterOnlyUntil + 1;
+  g.nextSpawnAt = 0;
+  const drifters = Array.from({ length: 5 }, (_, i) => spawnEnemy(g, 'drifter', 900, 200 + i * 60, 1));
+  seconds(g, 1);
+  assert.equal(g.spitterReleased, false, 'no spitter while five Drifters live');
+  for (const d of drifters) killEnemy(g, d, 1);
+  seconds(g, 0.5);
+  assert.equal(g.spitterReleased, true, 'released once the Drifters are cleared');
+});
+
+test('the first Spitter still comes after spitterGateTime even if a Drifter is left alive (no deadlock)', () => {
+  const g = createGame(11);
+  g.spawnQueue = [{ wave: 2, kind: 'spitter', size: 1, gap: 1 }];
+  g.warnings.length = 0;
+  g.enemies.length = 0;
+  g.liveWaves = [{ number: 2, total: 1, release: true }];
+  g.wave.number = 2;
+  g.wave.total = 1;
+  g.wave.release = true;
+  g.wave.startedAt = g.time = SPAWN.drifterOnlyUntil + 1;
+  g.nextSpawnAt = 0;
+  g.player.hp = 1000; // long enough for the gate time to pass; the drifters chase Rip the whole time
+  for (let i = 0; i < 5; i++) spawnEnemy(g, 'drifter', 900, 200 + i * 60, 1);
+  seconds(g, SPAWN.spitterGateTime + 0.5);
+  assert.equal(g.spitterReleased, true, 'released after the gate time');
+});
+
+test('the Spitter hint fires once, on the first wind-up (#84)', () => {
+  const g = quiet();
+  spawnEnemy(g, 'spitter', W / 2 + 300, H / 2);
+  const events = collect(g, ENEMY.spitter.firstShotDelay + ENEMY.spitter.windup + 0.1);
+  const hints = kindOf(events, 'hint');
+  assert.equal(hints.length, 1, 'one hint on the first wind-up');
+  assert.equal(hints[0].text, HINT_TEXT.spitter);
+  assert.equal(HINT_TEXT.spitter, 'DASH THROUGH BULLETS - OR RIGHT-CLICK TO REFLECT');
+  seconds(g, ENEMY.spitter.fireInterval + ENEMY.spitter.windup + 0.2);
+  assert.equal(kindOf(drainEvents(g), 'hint').length, 0, 'no second hint');
+});
+
+test('the Shellback hint fires once, when the first Shellback appears (#84)', () => {
+  const g = quiet();
+  spawnEnemy(g, 'shellback', 400, H / 2, 1);
+  const first = kindOf(drainEvents(g), 'hint');
+  assert.equal(first.length, 1);
+  assert.equal(first[0].text, HINT_TEXT.shellback);
+  assert.equal(HINT_TEXT.shellback, 'ARMORED FRONT - STRIKE FROM BEHIND OR PULSE IT');
+  spawnEnemy(g, 'shellback', 600, H / 2, 1);
+  assert.equal(kindOf(drainEvents(g), 'hint').length, 0, 'the second Shellback says nothing new');
+});
+
+test('a deflect bounces Rip 80 px back for 0.4 s, and refunds the charge the dash spent (#85)', () => {
+  const g = quiet();
+  place(g, 600, H / 2);
+  shellbackAt(g, 400, H / 2, 0);
+  update(g, dashAt(100, H / 2), SIM_DT);
+  run(g, 20); // the dash reaches the armour within about 11 steps, then the bounce runs
+  const b = g.player.bounce;
+  assert.ok(b, 'the bounce started');
+  assert.equal(b.dur, DASH.bounceTime, 'the bounce lasts DASH.bounceTime');
+  assert.equal(DASH.bounceTime, 0.4);
+  assertNear(Math.hypot(b.ex - b.sx, b.ey - b.sy), DASH.bounceDistance, 1e-6, 'the bounce is 80 px');
+  assert.equal(DASH.bounceDistance, 80);
+  assert.equal(g.player.dash.charges, DASH.maxCharges, 'the spent charge is refunded');
+});
+
+test('a Shellback is clamped inside the arena when it spawns, and so is a split mini (#82)', () => {
+  const g = quiet();
+  const shell = spawnEnemy(g, 'shellback', 40, 40, 1);
+  assert.ok(shell.x >= ARENA.inset + ENEMY.shellback.radius - 1e-9, 'shellback x clamped');
+  assert.ok(shell.y >= ARENA.inset + ENEMY.shellback.radius - 1e-9, 'shellback y clamped');
+  const mini = spawnEnemy(g, 'mini', 2, 2, 1);
+  assert.ok(mini.x >= ARENA.inset + ENEMY.mini.radius - 1e-9 && mini.y >= ARENA.inset + ENEMY.mini.radius - 1e-9, 'mini clamped');
+});
+
+test('enemy speed and Spitter bullet speed scale gently with the wave, with no cap past wave 20 (#97)', () => {
+  assert.equal(speedScaleFor(1), 1);
+  assert.ok(Math.abs(speedScaleFor(21) - (1 + SPAWN.speedPerWave * 20)) < 1e-9);
+  assert.ok(speedScaleFor(40) > speedScaleFor(21), 'keeps scaling past wave 20');
+  assert.equal(bulletSpeedFor(2), ENEMY.spitter.bulletSpeed, 'the first Spitter waves fire the slow bullets');
+  assert.ok(bulletSpeedFor(10) > bulletSpeedFor(2), 'bullets speed up by wave');
+  assert.equal(bulletSpeedFor(200), ENEMY.spitter.bulletSpeedMax, 'bullets cap at bulletSpeedMax');
+});
