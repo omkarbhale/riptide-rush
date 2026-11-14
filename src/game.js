@@ -27,8 +27,19 @@ import {
   dashRechargeScale,
   dashDistanceScale,
   comboDrainScale,
+  healPlayer, // #114: the Warden's guaranteed heal
 } from './pickups.js';
 import { planWave, formationOffsets, FORMATIONS } from './waves.js';
+// #114: Puffer, Shield Bearer, Ink Squid, Phase Eel and the Warden. Behaviour and data live in enemies-extra.js.
+import {
+  EXTRA_KINDS,
+  createExtras,
+  stepExtras,
+  pulseExtras,
+  playerSpeedScale,
+  breakBarrier,
+  isPresent,
+} from './enemies-extra.js';
 
 const W = LOGICAL_WIDTH;
 const H = LOGICAL_HEIGHT;
@@ -187,7 +198,7 @@ export const ENEMY_KINDS = {
     init() {},
     think(e, game, dt) {
       const c = ENEMY.drifter;
-      const speed = moveSpeed(e, c.speed);
+      const speed = e.lureSpeed ?? moveSpeed(e, c.speed); // #114: a Warden's lure dives at its own speed
       const far = Math.hypot(game.player.x - e.x, game.player.y - e.y) > c.chaseRange;
       if (e.school && far) holdSlot(e, game, dt, speed);
       else chase(e, game, dt, speed, c.steer);
@@ -414,6 +425,12 @@ export const ENEMY_KINDS = {
   },
 };
 
+// #114: the second round of enemy kinds, registered as one table (see enemies-extra.js).
+Object.assign(ENEMY_KINDS, EXTRA_KINDS);
+
+// Ops the extra enemies use from this module (enemies-extra.js never imports game.js).
+const EXTRA_OPS = { killEnemy, damagePlayer, spawnEnemy, healPlayer, entityCount, moveSpeed };
+
 // options: { spawning, startWave } . startWave lets tests and soaks begin at any wave of the script.
 export function createGame(seed = 1, options = {}) {
   const game = {
@@ -460,6 +477,7 @@ export function createGame(seed = 1, options = {}) {
     hints: {},           // one-time hints already shown this run (#84)
     spitterReleased: false, // the first Spitter waits until the Drifter schools are cleared
     spitterWaitFrom: -1,    // when the first Spitter first came due on the gate (-1: not yet)
+    extras: createExtras(EXTRA_OPS), // #114: shards, ink arcs, puddles
     events: [],
   };
   beginWave(game, options.startWave ?? 1);
@@ -520,6 +538,7 @@ export function update(game, input, dt) {
   updateSchools(game, worldDt);
   for (const e of game.enemies) updateEnemy(game, e, worldDt);
   for (const b of game.bullets) updateBullet(b, worldDt);
+  stepExtras(game, worldDt); // #114: shards, ink arcs, puddles, Shield Bearer Barriers
 
   updateSpawner(game, dt);
 
@@ -584,7 +603,7 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
   c.timer = comboWindowFor(c.count);
   const mult = multiplierFor(c.count);
   const bonus = slashIndex > 1 ? COMBO.multiBonus * mult : 0;
-  const points = def.points * mult + bonus;
+  const points = def.points * mult + bonus + (e.killBonus ?? 0); // killBonus: #114 lure Drifters
   game.score += points;
   game.kills += 1;
   const d = game.player.dash;
@@ -602,7 +621,7 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
     hitStopMs: hitStopFor(slashIndex),
     cause,
   });
-  if (def.onDeath) def.onDeath(game, e);
+  if (def.onDeath) def.onDeath(game, e, slashIndex); // #114: a Puffer's burst chains from this kill's slash index
   // PICKUPS: drop roll, then the Undertow shockwave chain (victims die through killEnemy too).
   onKill(game, e);
   let kills = 1;
@@ -675,15 +694,32 @@ function startDash(game, input) {
     nearMiss: false,
     deflected: false,
     assisted: plan.assisted,
+    hit: new Set(), // #114: enemies this dash has already touched with a 'strip' (barrier or boss hit)
   };
   p.facing = Math.atan2(plan.dirY, plan.dirX);
   game.events.push({ type: 'dash', x: p.x, y: p.y, angle: p.facing, assisted: plan.assisted });
 }
 
 // What the dash does to enemy e at the point (x, y): 'kill', 'deflect' or 'ignore'.
+// #114: a hidden enemy is not there to hit; a dash touches an enemy once (a barrier or a boss hit does not
+// repeat); a Barrier takes a 'strip' hit instead of a kill.
 function dashVerdict(game, e, d, x, y) {
   const def = ENEMY_KINDS[e.kind];
+  if (!isPresent(e, def)) return 'ignore';
+  if (d.hit && d.hit.has(e.id)) return 'ignore';
+  if (e.barrier) return 'strip';
   return def.dashHit ? def.dashHit(game, e, d, x, y) : 'kill';
+}
+
+// A 'strip' hit: the dash touches the enemy and it stays alive. Removes a Barrier, or runs the kind's onStrip.
+function stripEnemy(game, e, d) {
+  d.hit.add(e.id);
+  if (e.barrier) {
+    breakBarrier(game, e);
+    return;
+  }
+  const def = ENEMY_KINDS[e.kind];
+  if (def.onStrip) def.onStrip(game, e, d);
 }
 
 // The end point a dash aimed at (aimX, aimY) would reach and whether it would kill anything.
@@ -750,7 +786,12 @@ function finalArc(game, d) {
     const e = game.enemies[i];
     if (!e.alive) continue;
     if (!inFinalArc(d.ex, d.ey, d.dirX, d.dirY, e.x, e.y, DASH.finalArcRadius)) continue;
-    if (dashVerdict(game, e, d, d.ex, d.ey) !== 'kill') continue;
+    const verdict = dashVerdict(game, e, d, d.ex, d.ey);
+    if (verdict === 'strip') {
+      stripEnemy(game, e, d);
+      continue;
+    }
+    if (verdict !== 'kill') continue;
     d.kills += killEnemy(game, e, d.kills + 1, e.kind === 'mine' ? 'defuse' : 'dash'); // PICKUPS: chain kills count
   }
   for (const b of game.bullets) {
@@ -778,6 +819,8 @@ function sweepDash(game, d, x, y) {
       }
       if (verdict === 'kill') {
         d.kills += killEnemy(game, e, d.kills + 1, e.kind === 'mine' ? 'defuse' : 'dash'); // PICKUPS: chain kills count
+      } else if (verdict === 'strip') {
+        stripEnemy(game, e, d);
       }
     } else if (!d.nearMiss && distToSegment(d.lastX, d.lastY, x, y, e.x, e.y) <= DASH.whiffRadius) {
       d.nearMiss = true;
@@ -840,9 +883,10 @@ function stepMove(game, input, dt) {
     p.vx += mx * PLAYER.accel * dt;
     p.vy += my * PLAYER.accel * dt;
     const speed = Math.hypot(p.vx, p.vy);
-    if (speed > PLAYER.maxSpeed) {
-      p.vx *= PLAYER.maxSpeed / speed;
-      p.vy *= PLAYER.maxSpeed / speed;
+    const cap = PLAYER.maxSpeed * playerSpeedScale(game); // #114: an ink puddle halves it
+    if (speed > cap) {
+      p.vx *= cap / speed;
+      p.vy *= cap / speed;
     }
   } else {
     const f = Math.exp(-PLAYER.friction * dt);
@@ -888,6 +932,8 @@ function firePulse(game) {
     b.life = PULSE.reflectLife;
     game.events.push({ type: 'reflect', x: b.x, y: b.y });
   }
+
+  if (pulseExtras(game)) perfect = true; // #114: a reflected ink arc or a Warden stun in its telegraph
 
   for (const e of game.enemies) {
     if (!e.alive || ENEMY_KINDS[e.kind].staggerable === false) continue;
@@ -1026,7 +1072,7 @@ function enemiesTouchPlayer(game) {
   for (let i = 0; i < n; i++) {
     const e = game.enemies[i];
     const def = ENEMY_KINDS[e.kind];
-    if (!e.alive || def.contact === false || e.grace > 0) continue;
+    if (!e.alive || def.contact === false || e.grace > 0 || !isPresent(e, def)) continue;
     // Fair reach: a non-lunging enemy must get inside its radius plus the player's core, so grazes are
     // safe; a charger hurts only while lunging, at full body reach.
     let reach = e.r + PLAYER.coreRadius;
@@ -1054,6 +1100,8 @@ function detonateMine(game, e) {
   for (let i = 0; i < n; i++) {
     const other = game.enemies[i];
     if (!other.alive || other === e) continue;
+    const od = ENEMY_KINDS[other.kind];
+    if (od.dashOnly || !isPresent(other, od)) continue; // #114: a Warden is only hurt by a dash
     if (Math.hypot(other.x - e.x, other.y - e.y) <= c.blastRadius + other.r) {
       killEnemy(game, other, 1, 'blast');
     }
@@ -1066,7 +1114,7 @@ function reflectedBulletsHitEnemies(game) {
     if (!b.alive || b.owner !== 'player') continue;
     for (const e of game.enemies) {
       // #81: Pulse has no effect on a kind marked staggerable: false (mines), so a reflected bullet passes them.
-      if (!e.alive || ENEMY_KINDS[e.kind].staggerable === false) continue;
+      if (!e.alive || ENEMY_KINDS[e.kind].staggerable === false || !isPresent(e, ENEMY_KINDS[e.kind])) continue;
       if (segmentHitsCircle(b.px, b.py, b.x, b.y, e.x, e.y, e.r + b.r)) {
         b.alive = false;
         game.burstKills += killEnemy(game, e, game.burstKills + 1, 'reflect');
@@ -1118,6 +1166,7 @@ function beginWave(game, number) {
   w.startedAt = game.time;
   w.total = total;
   w.release = plan.release;
+  w.boss = plan.boss; // #114: the boss this wave holds for, or null
   game.liveWaves.push({ number, total, release: plan.release });
   game.nextSpawnAt = Math.max(game.nextSpawnAt, game.time + SPAWN.groupLeadIn);
   game.events.push({ type: 'waveStart', wave: number });
@@ -1159,7 +1208,8 @@ function updateSpawner(game, dt) {
       if (age >= SPAWN.releaseTimeLimit) beginWave(game, w.number + 1); // the breather is kept when it clears
     } else {
       const threshold = Math.max(1, Math.ceil(SPAWN.stragglers * w.total));
-      if (remainingOf(game, w.number) <= threshold || age >= SPAWN.waveTimeLimit) beginWave(game, w.number + 1);
+      // #114: a boss wave ends when its boss dies, so it never hands over early.
+      if (!w.boss && (remainingOf(game, w.number) <= threshold || age >= SPAWN.waveTimeLimit)) beginWave(game, w.number + 1);
     }
   }
 

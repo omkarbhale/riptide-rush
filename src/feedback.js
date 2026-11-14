@@ -55,6 +55,29 @@ export const GAME_EVENT_TYPES = Object.freeze([
   'chargerTelegraph',
   'chargerLunge',
   'hint', // one-time lesson text (#84): the first Spitter wind-up or the first Shellback
+  // #114: the second round of enemies (enemies-extra.js). Each reuses an existing sound and preset.
+  'puffSwell',
+  'puffBurst',
+  'bearerHit',
+  'barrierBreak',
+  'lobThrow',
+  'lobLand',
+  'lobReflect',
+  'lobDeflect',
+  'puddleDispel',
+  'eelRipple',
+  'eelSurface',
+  'eelBite',
+  'eelHide',
+  'eelStun',
+  'lureSpawn',
+  'bossIntro',
+  'bossTelegraph',
+  'bossExpose',
+  'bossHit',
+  'bossPhase',
+  'bossStun',
+  'bossDown',
 ]);
 
 const SPAWN_BURST_WINDOW_S = 0.2; // spawn markers closer than this (sim seconds) belong to one burst (#79)
@@ -354,6 +377,119 @@ export const FEEDBACK = Object.freeze({
     shake: () => 8,
     hitstop: () => 40,
     flash: () => [PALETTE.danger, 0.2],
+  },
+
+  // #114 (Puffer): the swell is a rising telegraph whine; the burst is the mine's burst, bigger, with a shake.
+  puffSwell: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 1.8, volume: 0.4, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: PALETTE.bullet }),
+  },
+  puffBurst: {
+    sound: (ev) => ({ name: 'mineExplode', pitch: 1.4, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'mineExplode' }),
+    shake: () => 4,
+  },
+
+  // #114 (Shield Bearer): a barrier takes a dash, which is a clang; the Bearer's own hit is a lower clang.
+  bearerHit: {
+    sound: (ev) => ({ name: 'reflect', pitch: 0.6, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+    shake: () => 3,
+  },
+  barrierBreak: {
+    sound: (ev) => ({ name: 'reflect', pitch: 1.1, volume: 0.7, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+    floater: () => ({ text: 'BARRIER', color: '#9fb4c8', size: 18, life: 0.6 }),
+  },
+
+  // #114 (Ink Squid): the lob is a shot leaving the squid; its landing is a soft thud and an ink puff;
+  // a perfect reflection is the perfect-pulse shatter; a deflection and a puddle dispelled by a dash are clangs and a puff.
+  lobThrow: {
+    sound: (ev) => ({ name: 'enemyShoot', pitch: 0.6, volume: 0.5, pan: panFor(ev.x) }),
+  },
+  lobLand: {
+    sound: (ev) => ({ name: 'mineArm', pitch: 0.5, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: '#7a5cff' }),
+  },
+  lobReflect: {
+    sound: (ev) => ({ name: 'perfectPulse', pitch: 1.2, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'perfectShatter' }),
+    flash: () => ['#ffffff', 0.12],
+  },
+  lobDeflect: {
+    sound: (ev) => ({ name: 'reflect', pitch: 0.9, volume: 0.5, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+  },
+  puddleDispel: {
+    sound: (ev) => ({ name: 'dash', pitch: 0.7, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'whiffPuff' }),
+  },
+
+  // #114 (Phase Eel): the ripple warns, the surfacing and bite are a rip, going under is a soft puff.
+  eelRipple: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 0.6, volume: 0.5, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: '#5dd9ff' }),
+  },
+  eelSurface: {
+    sound: (ev) => ({ name: 'chargerLunge', pitch: 1.3, volume: 0.5, pan: panFor(ev.x) }),
+    shake: () => 2,
+  },
+  eelBite: {
+    sound: (ev) => ({ name: 'chargerLunge', pitch: 1.1, volume: 0.6, pan: panFor(ev.x) }),
+  },
+  eelHide: {
+    sound: (ev) => ({ name: 'uiClick', pitch: 0.5, volume: 0.3, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'whiffPuff' }),
+  },
+  eelStun: {
+    sound: (ev) => ({ name: 'reflect', pitch: 1.25, volume: 0.5, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'chargeGlint' }),
+  },
+
+  // #114: a lure of Drifters from the Warden, and the Warden's own beats. The intro is a sound and a
+  // screen flash: the boss's arrival. The telegraph is a low whine; the exposure is a bright tick, and a hit is
+  // a heavy thud. A phase change is a second flash.
+  lureSpawn: {
+    sound: (ev) => ({ name: 'enemyShoot', pitch: 1.6, volume: 0.4, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: PALETTE.danger }),
+  },
+  bossIntro: {
+    sound: (ev) => ({ name: 'waveStart', pitch: 0.6, pan: panFor(ev.x) }),
+    shake: () => 10,
+    flash: () => [PALETTE.danger, 0.3],
+    floater: () => ({ text: 'WARDEN', color: PALETTE.danger, size: 28, life: 1.6 }),
+  },
+  bossTelegraph: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 0.7, volume: 0.6, pan: panFor(ev.x) }),
+  },
+  bossExpose: {
+    sound: (ev) => ({ name: 'spawnWarn', pitch: 1.5, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'chargeGlint' }),
+  },
+  bossHit: {
+    sound: (ev) => ({ name: 'kill', pitch: 0.5, volume: 0.7, pan: panFor(ev.x) }),
+    preset: (ev) => ({ name: 'killLarge', color: PALETTE.danger }),
+    shake: () => 6,
+    hitstop: () => 50,
+  },
+  bossPhase: {
+    sound: (ev) => ({ name: 'waveStart', pitch: 1.2, pan: panFor(ev.x) }),
+    shake: () => 8,
+    flash: () => [PALETTE.danger, 0.25],
+    floater: () => ({ text: 'PHASE 2', color: PALETTE.danger, size: 22, life: 1.2 }),
+  },
+  bossStun: {
+    sound: (ev) => ({ name: 'perfectPulse', pitch: 0.7, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'perfectShatter' }),
+    hitstop: () => 40,
+    flash: () => ['#ffffff', 0.12],
+  },
+  bossDown: {
+    sound: (ev) => ({ name: 'comboTierUp', pitch: 0.8, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'comboTierBloom', color: PALETTE.gold }),
+    shake: () => 12,
+    hitstop: () => 60,
+    flash: () => ['#ffffff', 0.25],
   },
 
   // The wave is cleared and the next one is about to start (#70): a rising chime, a gold bloom, a brief gold
