@@ -121,7 +121,7 @@ The beginner's game uses the same rules. The only difference is how many dashes 
 | Max HP | 3 | #1 |
 | Damage per hit | 1 | proposed |
 | Invulnerability after hit | 1.0 s, player sprite blinks at 10 Hz | #1 (duration) / blink proposed |
-| Healing | None in v1 (see Q2) | proposed |
+| Healing | Heal orbs and flawless-wave heals, see §3.9a (supersedes Q2, #54) | #54 |
 | Death | HP reaches 0 → DEAD state (§4.1) | #1 |
 | Restart | R or click; death-to-playable under 300 ms | #1 |
 | Combo on hit | Being hurt does not reset the combo; only timer expiry does | proposed |
@@ -167,6 +167,41 @@ Damage sources: enemy bullets (1), Drifter contact (1, Drifter dies), Charger lu
 | Combo counter | Top-center; color = tier color; timer bar underneath | proposed |
 | HP | 3 orbs top-left | proposed |
 | Score | Top-left, under HP; high score top-right from localStorage | #1 (high score) |
+
+### 3.9a Health recovery and modifier drops (#54)
+
+Recovery and power are earned by chaining, and they pull Rip toward the fight. Nothing needs a menu or a pause. Source: #54; builds on #21 (healing, superseded), #32 (Spark Coral), #34 (Riptide Coal), #36 (Shield Scale). Code: `src/pickups.js` (rules), `src/config.js` (`PICKUP`, `MODIFIER`), `src/pickups-art.js` (drawing and HUD).
+
+**Heal orb (green heart).** Drops only while Rip is below max HP.
+
+| Parameter | Value |
+|---|---|
+| Chance per kill | 2% + 2% per missing hit point (4% at 2 HP, 6% at 1 HP) |
+| Combo tier guarantee | Reaching a new combo tier while hurt guarantees a heal drop |
+| Pity | Guaranteed on the 40th kill while hurt without a heal drop |
+| Collect | Restores 1 HP |
+| Flawless wave | A wave that clears (`waveClear`) with no HP lost restores 1 HP (`source: 'flawless'`, no orb) |
+| Full HP | A heal that would restore HP converts to bonus score: 200 × multiplier. Never wasted |
+
+**Modifier drops.** Each lasts a few seconds, shows a countdown bar in the HUD (one row per modifier, under the combo), and stacks by refreshing its timer.
+
+| Modifier | Colour / shape | Effect | Duration |
+|---|---|---|---|
+| Spark Coral | cyan / four-point spark | +1 max dash charge (4) and instant full recharge | 8 s |
+| Riptide Coal | gold / hexagon | Combo timer drains at half speed | 6 s |
+| Shield Scale | white / shield | Absorbs the next hit, then a 0.25 s bounce grace and a knockback so a touching enemy cannot drain HP next frame | 6 s or until used |
+| Frenzy | magenta / chevron | Dash charges recharge 3× faster; dash distance +25% | 6 s |
+| Undertow | violet / swirl | Every kill releases a 90 px shockwave that kills adjacent enemies; chain kills count for score and combo | 5 s |
+
+Shield Scale is drawn as a silver aura around Rip with a ring that empties as the shield runs out.
+
+**Drop rules (shared by heal and modifier drops).** At most one drop per kill, never two drops within 4 s, at most 3 pickups on the field. Modifier drops: 5% per kill, guaranteed on the 30th kill without one. Drops appear at the kill point with a small outward pop.
+
+**Pickup behaviour.** Collected by touching. Inside 120 px they are pulled toward Rip at 420 px/s. A dash path passing within 60 px collects them, so chaining sweeps them up. They last 7 s and blink for the final 2 s, then despawn.
+
+**Events** (drained by `main.js`): `pickupDrop {kind,x,y}`, `pickup {kind,x,y}`, `modifierEnd {kind}`, `heal {x,y,source,hp,bonus}`, `shieldBreak {x,y}`.
+
+**Still open.** Pickup sounds and floaters are wired only as far as `pickups-art.js` (rings and floaters drawn from sim state). Mapping the events above to `audio.js` and `fx.js` is follow-up work in `main.js`.
 
 ### 3.10 Look and palette
 
@@ -465,7 +500,7 @@ Rules:
 Each open question below has a matching GitHub issue labelled `design` with a concrete recommendation, linked from its entry.
 
 - **Q1 ([#18](https://github.com/omkarbhale/riptide-rush/issues/18)). Pause behavior.** Should Esc or P pause, and should the window auto-pause on blur? Recommendation: yes to both, with the pause overlay listing the controls.
-- **Q2 ([#21](https://github.com/omkarbhale/riptide-rush/issues/21)). Healing.** Should Rip regain HP? Recommendation: no healing in v1. Three HP is the run; combo and charge management are the recovery systems.
+- **Q2 ([#21](https://github.com/omkarbhale/riptide-rush/issues/21)). Healing.** Superseded by #54 (§3.9a): Rip recovers HP through heal orbs and flawless waves, both earned by chaining. The original recommendation (no healing) was reversed after playtest: an early mistake stayed permanent for the whole run.
 - **Q3 ([#23](https://github.com/omkarbhale/riptide-rush/issues/23)). Mine defuse counts as a kill?** Recommendation: yes, it adds to combo, scores 75 × multiplier, and refunds a charge, so dashing through mines is never a worse choice than dashing through Drifters.
 - **Q4 ([#25](https://github.com/omkarbhale/riptide-rush/issues/25)). Perfect pulse window definition.** The window is defined as time-to-impact ≤ 0.12 s. For a 230 px/s spitter bullet that is about 28 px of travel, a narrow window. Recommendation: keep the definition and validate it in the fx lab with a playtest of at least 20 pulses; widen to 0.15 s only if fewer than one in five pulses on incoming bullets is perfect.
 - **Q5 ([#27](https://github.com/omkarbhale/riptide-rush/issues/27)). Shellback front contact.** Should dashing into the front arc bounce Rip back, or stop Rip where they touched? Recommendation: bounce 40 px over 0.1 s, no damage, charge spent. It reads as a clear failure without punishing hard.

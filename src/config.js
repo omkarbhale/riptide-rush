@@ -143,4 +143,41 @@ export const SPAWN = {
   drifterOnlyUntil: 30,   // run time (s) during which every spawn is a Drifter, to teach chaining
 };
 
+// Health recovery and modifier drops (#54). Logic lives in src/pickups.js.
+export const PICKUP = {
+  radius: 10,             // px, touch radius of a pickup (drawn about 20 px across)
+  lifetime: 7,            // seconds on the field before it despawns
+  blinkWindow: 2,         // it blinks during the final seconds
+  popSpeed: 150,          // px/s outward kick when dropped
+  popFriction: 6,         // per-second decay of the pop
+  magnetRadius: 120,      // px: pickups inside this are pulled toward the player
+  magnetSpeed: 420,       // px/s pull speed
+  dashCollectRadius: 60,  // px: a dash path passing this close collects a pickup
+  maxOnField: 3,          // heal and modifier pickups combined
+  dropSpacing: 4,         // seconds between any two drops
+  overflowScore: 200,     // base points when a heal lands at full HP (x multiplier)
+  heal: {
+    baseChance: 0.02,     // per kill while hurt
+    chancePerMissingHp: 0.02,
+    pityKills: 40,        // guaranteed after this many hurt kills without one
+    restore: 1,           // HP restored by one heal orb or a flawless wave
+  },
+  modifierChance: 0.05,   // per kill
+  modifierPityKills: 30,  // guaranteed after this many kills without a modifier drop
+  shield: {
+    grace: 0.25,           // seconds of no contact damage after a shield absorbs a hit
+    bounceKnockback: 0.6, // fraction of PLAYER.hitKnockback applied when a shield absorbs
+  },
+  undertowRadius: 90,     // px: shockwave radius released by every kill under Undertow
+};
+
+// Modifier durations and effects, one entry per kind. Stacking refreshes the timer.
+export const MODIFIER = {
+  sparkCoral: { duration: 8, extraCharges: 1 },           // +1 max dash charge, instant full recharge
+  riptideCoal: { duration: 6, comboDrainScale: 0.5 },     // combo timer drains at half speed
+  shieldScale: { duration: 6 },                           // absorbs the next hit
+  frenzy: { duration: 6, rechargeScale: 3, dashDistanceBonus: 0.25 },
+  undertow: { duration: 5 },                              // kills release a shockwave
+};
+
 export const HIGH_SCORE_KEY = 'riptide-rush.highScore';

@@ -639,6 +639,8 @@ test('same seed and same inputs give identical state', () => {
 const KNOWN = new Set([
   'kill', 'dash', 'hurt', 'pulse', 'reflect', 'perfectPulse', 'comboTier', 'comboLost', 'waveStart', 'waveClear',
   'gameOver', 'deflect', 'stagger', 'mineArm', 'mineExplode',
+  // PICKUPS (#54): health recovery and modifier drop events.
+  'pickupDrop', 'pickup', 'modifierEnd', 'heal', 'shieldBreak',
 ]);
 
 const finite = (g) => {
