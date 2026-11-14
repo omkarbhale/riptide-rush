@@ -18,7 +18,7 @@ import {
 } from '../src/feedback.js';
 
 // Synthetic types the feedback layer derives from state, not sim events.
-const DERIVED_TYPES = ['chargeReady', 'spawnWarning', 'multiKill', 'multiKillEnd'];
+const DERIVED_TYPES = ['chargeReady', 'spawnWarning', 'multiKill', 'multiKillEnd', 'uiStart', 'uiClick'];
 
 // Recording stubs for the audio and effects modules. Every method the feedback layer calls is here.
 function recorder() {
@@ -154,13 +154,121 @@ test('fuzzed simulation: every emitted event maps, nothing throws, and sounds an
     }
     for (const s of calls.sounds) {
       assert.ok(SOUND_NAMES.includes(s.name), `unknown sound "${s.name}"`);
-      assert.ok(s.pitch >= 1 && s.pitch <= 2, `pitch ${s.pitch} outside 1..2`);
+      assert.ok(s.pitch >= 0.25 && s.pitch <= 4, `pitch ${s.pitch} outside audio.play's 0.25..4 clamp`);
       assert.ok(s.pan >= -0.8 - 1e-9 && s.pan <= 0.8 + 1e-9, `pan ${s.pan} outside ±0.8`);
     }
   }
   for (const must of ['dash', 'kill', 'hurt', 'waveStart', 'gameOver']) {
     assert.ok(seen.has(must), `fuzzing never produced a "${must}" event, so the coverage claim is weak`);
   }
+});
+
+// What counts as feedback for one event: its sound, or else its first visible effect. Null means silent.
+function feedbackOf(row, ev) {
+  if (row.sound?.(ev)) return 'sound';
+  if (row.preset?.(ev)) return 'preset';
+  if ((row.shake?.(ev) ?? 0) > 0) return 'shake';
+  if ((row.hitstop?.(ev) ?? 0) > 0) return 'hitstop';
+  if (row.flash?.(ev)) return 'flash';
+  if (row.slowmo?.(ev)) return 'slowmo';
+  if (row.floater?.(ev)) return 'floater';
+  if (row.ring?.(ev)) return 'ring';
+  return null;
+}
+
+test('no event is silent: every type the game emits has a sound or an effect, and so does every synthetic one (#91)', () => {
+  const types = [...GAME_EVENT_TYPES, 'chargeReady', 'multiKill', 'multiKillEnd', 'spawnWarning', 'uiStart', 'uiClick'];
+  for (const type of types) {
+    const ev = { ...GENERIC, type, first: true };
+    assert.ok(feedbackOf(FEEDBACK[type], ev), `"${type}" has neither a sound nor an effect`);
+  }
+});
+
+test('a Shellback deflect is a clang with a jolt, a white flash and an ARMOUR floater (#67)', () => {
+  const { audio, fx, calls } = recorder();
+  const feedback = createFeedback({ audio, fx });
+  feedback.handleStep([{ type: 'deflect', x: 400, y: 300 }], createGame(1));
+  assert.ok(calls.sounds.some((s) => s.name === 'reflect'), 'clang');
+  assert.ok(calls.shake > 0, 'jolt');
+  assert.deepEqual(calls.hitstop, [35]);
+  assert.equal(calls.flashes.length, 1, 'white flash');
+  assert.deepEqual(calls.floaters, ['ARMOUR']);
+});
+
+test('a mine arms with a tone, then detonates with a boom, a burst, a shake and a hit-stop (#66)', () => {
+  const { audio, fx, calls } = recorder();
+  const feedback = createFeedback({ audio, fx });
+  const game = createGame(1);
+  feedback.handleStep([{ type: 'mineArm', x: 400, y: 300 }], game);
+  assert.ok(calls.sounds.some((s) => s.name === 'mineArm'), 'arming tone');
+  feedback.handleStep([{ type: 'mineExplode', x: 400, y: 300 }], game);
+  assert.ok(calls.sounds.some((s) => s.name === 'mineExplode'), 'boom');
+  assert.ok(calls.bursts >= 2, 'the mine burst (arming motes, then the blast)');
+  assert.ok(calls.shake > 0, 'shake');
+  assert.deepEqual(calls.hitstop, [40]);
+});
+
+test('stagger ticks, and a wave clear chimes with a gold flash and a WAVE CLEAR floater (#70)', () => {
+  const { audio, fx, calls } = recorder();
+  const feedback = createFeedback({ audio, fx });
+  const game = createGame(1);
+  feedback.handleStep([{ type: 'stagger', x: 400, y: 300 }], game);
+  assert.ok(calls.sounds.some((s) => s.name === 'reflect'), 'stagger tick');
+  feedback.handleStep([{ type: 'waveClear', wave: 2 }], game);
+  assert.ok(calls.sounds.some((s) => s.name === 'comboTierUp'), 'chime');
+  assert.equal(calls.flashes.length, 1, 'the wave clear flashes gold (stagger is a tick and sparks, no flash)');
+  assert.ok(calls.floaters.includes('WAVE CLEAR'));
+});
+
+test('a perfect pulse floater shows the points it awards (#78)', () => {
+  const { audio, fx, calls } = recorder();
+  const feedback = createFeedback({ audio, fx });
+  feedback.handleStep([{ type: 'perfectPulse', x: 400, y: 300, points: 150 }], createGame(1));
+  assert.deepEqual(calls.floaters, ['PERFECT PULSE +150']);
+});
+
+test('enemy warnings and wind-ups are sounds, panned to the enemy (#68, #69)', () => {
+  const { audio, fx, calls } = recorder();
+  const feedback = createFeedback({ audio, fx });
+  const game = createGame(1);
+  feedback.handleStep([{ type: 'spitWindup', x: W, y: 300 }], game);
+  feedback.handleStep([{ type: 'chargerTelegraph', x: W, y: 300 }], game);
+  feedback.handleStep([{ type: 'chargerLunge', x: W, y: 300 }], game);
+  const names = calls.sounds.map((s) => s.name);
+  assert.deepEqual(names, ['chargerTelegraph', 'chargerTelegraph', 'chargerLunge']);
+  for (const s of calls.sounds) assert.ok(Math.abs(s.pan - 0.8) < 1e-9, `${s.name} pan ${s.pan}, want the right edge`);
+});
+
+test('menus and pause have sounds: start and restart play uiStart, pause and resume play uiClick (#71)', () => {
+  const { audio, fx, calls } = recorder();
+  const feedback = createFeedback({ audio, fx });
+  feedback.startRun();
+  assert.equal(calls.sounds.at(-1).name, 'uiStart');
+  feedback.setPaused(true);
+  assert.equal(calls.sounds.at(-1).name, 'uiClick');
+  feedback.setPaused(false);
+  assert.equal(calls.sounds.at(-1).name, 'uiClick');
+});
+
+test('a spawn burst makes one soft cue and no floater, and the next burst makes its own cue (#79)', () => {
+  const { audio, fx, calls } = recorder();
+  const feedback = createFeedback({ audio, fx });
+  const game = createGame(1, { spawning: false });
+  const marker = (x) => ({ kind: 'drifter', x, y: 100, t: 0.9, wave: 1 });
+  // A burst: three markers, one per sim step, 25 ms apart.
+  for (let i = 0; i < 3; i++) {
+    game.time = i * SIM_DT;
+    game.warnings.push(marker(200 + 100 * i));
+    feedback.handleStep([], game);
+  }
+  // The next burst, 0.6 s later.
+  game.time = 0.6;
+  game.warnings.push(marker(600));
+  feedback.handleStep([], game);
+  const cues = calls.sounds.filter((s) => s.name === 'spawnWarn');
+  assert.equal(cues.length, 2, `want one cue per burst, got ${cues.length}`);
+  assert.equal(calls.bursts, 2, 'one motes burst per burst');
+  assert.deepEqual(calls.floaters, [], 'spawn markers have no floater');
 });
 
 test('a dash that kills three enemies peaks at the matrix hit-stop (60 ms) and shake (8 px)', () => {

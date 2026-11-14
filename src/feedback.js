@@ -2,8 +2,8 @@
 // score floaters. The mapping is one table, FEEDBACK, which follows the feedback matrix in
 // docs/DESIGN.md section 5.
 //
-// Each row is keyed by a game.events type, or by a synthetic type this layer derives from state
-// (chargeReady, spawnWarning, multiKill, multiKillEnd). Every field of a row is a function of the
+// Each row is keyed by a game.events type, or by a synthetic type this layer derives from state or
+// is called with (chargeReady, spawnWarning, multiKill, multiKillEnd, uiStart, uiClick). Every field of a row is a function of the
 // event and returns an effect, or null when the row has nothing to say for that event:
 //   sound(ev)    -> { name, pitch?, volume?, pan? }       name must be in SOUND_NAMES (src/audio.js)
 //   preset(ev)   -> { name, color?, angle? }              name must be a key of PRESET_BURSTS
@@ -51,7 +51,13 @@ export const GAME_EVENT_TYPES = Object.freeze([
   'stagger',
   'mineArm',
   'mineExplode',
+  'spitWindup',
+  'chargerTelegraph',
+  'chargerLunge',
 ]);
+
+const SPAWN_BURST_WINDOW_S = 0.2; // spawn markers closer than this (sim seconds) belong to one burst (#79)
+const MENU_EV = Object.freeze({ x: W / 2, y: H / 2 }); // menu sounds are centred: they have no arena position
 
 const PAN_WIDTH = 0.8; // stereo pan at the arena edge; the centre is 0
 const PITCH_PER_COMBO = 0.02; // kill chime: 1 + 0.02 * min(combo, 30)
@@ -123,6 +129,8 @@ export const PRESET_BURSTS = Object.freeze({
   spitShot: () => [{ count: 5, shape: 'dot', color: PALETTE.bullet, speed: 90, life: 0.25, size: 2.5, drag: 3 }],
   // A dash that whiffed: a faint, short-lived puff at the end point. Quiet on purpose.
   whiffPuff: () => [{ count: 6, shape: 'dot', color: '#7fd6ff', speed: 60, life: 0.3, size: 2, drag: 4 }],
+  // The mine's own burst from fx.js (shards, a ring and sparks).
+  mineExplode: () => FX_PRESETS.mineExplode.bursts,
 });
 
 // ---- the mapping table --------------------------------------------------------------------------
@@ -207,15 +215,14 @@ export const FEEDBACK = Object.freeze({
     ring: () => ({ life: 0.3, perfect: false }),
   },
 
-  // Perfect pulse: time scale 0.35 for 200 ms instead of hit-stop. The floater says PERFECT PULSE, not +150:
-  // src/game.js does not award the 150 yet (see the issue filed with this PR).
+  // Perfect pulse: time scale 0.35 for 200 ms instead of hit-stop. The floater shows the award the sim made (#78).
   perfectPulse: {
     sound: () => ({ name: 'perfectPulse' }),
     preset: () => ({ name: 'perfectShatter' }),
     shake: () => 5,
     slowmo: () => [0.35, 200],
     flash: () => ['#ffffff', 0.25],
-    floater: () => ({ text: 'PERFECT PULSE', color: PALETTE.gold, size: 26, life: 0.9 }),
+    floater: (ev) => ({ text: ev.points ? `PERFECT PULSE +${ev.points}` : 'PERFECT PULSE', color: PALETTE.gold, size: 26, life: 0.9 }),
     ring: () => ({ life: 0.45, perfect: true }),
   },
 
@@ -281,8 +288,24 @@ export const FEEDBACK = Object.freeze({
 
   // A spitter released its shot. Keeps the existing shot sound; the muzzle motes are new.
   enemyShoot: {
-    sound: (ev) => ({ name: 'enemyShoot', pan: panFor(ev.x) }),
+    sound: (ev) => ({ name: 'enemyShoot', volume: 0.5, pan: panFor(ev.x) }),
     preset: (ev) => ({ name: 'spitShot' }),
+  },
+
+  // A spitter winds up a shot (#68, #69 spirit): a quieter, higher whine at the muzzle, so the shot is heard
+  // before it leaves. The shot itself is enemyShoot above.
+  spitWindup: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 1.5, volume: 0.35, pan: panFor(ev.x) }),
+  },
+
+  // A charger starts its telegraph (0.6 s before the lunge): the warning whine, panned to the charger.
+  chargerTelegraph: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pan: panFor(ev.x) }),
+  },
+
+  // A charger lunges: the rip, panned to the charger.
+  chargerLunge: {
+    sound: (ev) => ({ name: 'chargerLunge', pan: panFor(ev.x) }),
   },
 
   // A dash that killed nothing but passed close to an enemy: a quiet dash whoosh and a faint puff. No shake, no floater.
@@ -292,11 +315,15 @@ export const FEEDBACK = Object.freeze({
   },
 
   // Not in the DESIGN matrix (section 5 predates these sim events). Rows chosen here from existing sounds and presets.
-  // A Shellback's armour turned the dash: a low, short clank and a small jolt. The dash ends there, so no whoosh.
+  // A Shellback's armour turned the dash (#67): a low clang at the contact point, a jolt, a white flash, and an
+  // ARMOUR floater so the bounce reads as a deliberate block. The dash ends there, so no whoosh.
   deflect: {
     sound: (ev) => ({ name: 'reflect', pitch: 0.8, pan: panFor(ev.x) }),
     preset: () => ({ name: 'reflectSpark' }),
-    shake: () => 3,
+    shake: () => 6,
+    hitstop: () => 35,
+    flash: () => ['#ffffff', 0.1],
+    floater: () => ({ text: 'ARMOUR', color: '#9fb4c8', size: 22, life: 0.6 }),
   },
 
   // Pulse staggered an enemy: a crisp tick and white sparks on the enemy.
@@ -311,18 +338,23 @@ export const FEEDBACK = Object.freeze({
     preset: () => ({ name: 'spawnMotes', color: PALETTE.danger }),
   },
 
-  // A mine detonated: the blast sound, an expanding ring, a short shake and a dim danger flash.
+  // A mine detonated (#66): the deep boom, the mine's burst from fx.js (its shockwave ring is part of that burst,
+  // at the blast's own scale; render.js rings are PULSE.radius, which is larger than the 90 px blast), a shake,
+  // a short hit-stop and a dim danger flash.
   mineExplode: {
     sound: (ev) => ({ name: 'mineExplode', pan: panFor(ev.x) }),
-    preset: () => ({ name: 'pulseRing' }),
-    shake: () => 6,
+    preset: () => ({ name: 'mineExplode' }),
+    shake: () => 8,
+    hitstop: () => 40,
     flash: () => [PALETTE.danger, 0.2],
   },
 
-  // The wave is cleared and the next one is about to start: a gold bloom and a WAVE CLEAR banner.
+  // The wave is cleared and the next one is about to start (#70): a rising chime, a gold bloom, a brief gold
+  // flash and a WAVE CLEAR banner.
   waveClear: {
-    sound: () => ({ name: 'comboTierUp' }),
+    sound: () => ({ name: 'comboTierUp', pitch: 1.5 }),
     preset: () => ({ name: 'comboTierBloom', color: PALETTE.gold }),
+    flash: () => [PALETTE.gold, 0.12],
     floater: () => ({ text: 'WAVE CLEAR', color: PALETTE.gold, size: 32, life: 1.2 }),
   },
 
@@ -332,11 +364,22 @@ export const FEEDBACK = Object.freeze({
     preset: () => ({ name: 'chargeGlint' }),
   },
 
-  // Synthetic: a spawn marker appears, 0.8 s before its enemy.
+  // Synthetic: a spawn marker appears, SPAWN.warning seconds before its enemy (#79). Only the first marker of a
+  // spawn burst (ev.first) makes a cue: one soft tick and a motes burst. The rest of the burst is silent, and no
+  // marker gets a floater, so a busy wave does not become a stream of "!"s.
   spawnWarning: {
-    sound: (ev) => ({ name: 'spawnWarn', volume: 0.4, pan: panFor(ev.x) }),
-    preset: (ev) => ({ name: 'spawnMotes', color: PALETTE.danger }),
-    floater: () => ({ text: '!', color: PALETTE.danger, size: 30, life: 0.6 }),
+    sound: (ev) => (ev.first ? { name: 'spawnWarn', volume: 0.3, pan: panFor(ev.x) } : null),
+    preset: (ev) => (ev.first ? { name: 'spawnMotes', color: PALETTE.danger } : null),
+  },
+
+  // Synthetic: the start of a run (startRun) and a restart. Shared by Start and restart from every menu path.
+  uiStart: {
+    sound: () => ({ name: 'uiStart' }),
+  },
+
+  // Synthetic: pause and resume (setPaused). The mute toggle is not here: it lives in src/main.js.
+  uiClick: {
+    sound: () => ({ name: 'uiClick' }),
   },
 });
 
@@ -351,6 +394,7 @@ export function createFeedback({ audio, fx }) {
   let curGame = null;
   let prevCharges = 0;
   const seenWarnings = new WeakSet();
+  let lastWarnAt = -Infinity; // sim time of the latest spawn marker, for burst grouping (#79)
   let runActive = false;
   let musicOn = false;
   let musicLevel = 0;
@@ -484,6 +528,7 @@ export function createFeedback({ audio, fx }) {
     later.length = 0;
     rings.length = 0;
     prevCharges = game.player.dash.charges;
+    lastWarnAt = -Infinity;
   }
 
   // Called once per simulation step with that step's drained events. Derives the synthetic
@@ -503,7 +548,9 @@ export function createFeedback({ audio, fx }) {
     for (const wn of game.warnings) {
       if (seenWarnings.has(wn)) continue;
       seenWarnings.add(wn);
-      play('spawnWarning', { x: wn.x, y: wn.y, kind: wn.kind }, null);
+      const first = game.time - lastWarnAt > SPAWN_BURST_WINDOW_S; // a new burst, not another marker of this one
+      lastWarnAt = game.time;
+      play('spawnWarning', { x: wn.x, y: wn.y, kind: wn.kind, first }, null);
     }
 
     if (d.active) fx.trail(p.x, p.y, Math.atan2(d.active.dirY, d.active.dirX), TRAIL);
@@ -539,13 +586,17 @@ export function createFeedback({ audio, fx }) {
     handleStep,
     frame,
     rings,
+    // Start and restart both come through here, so the start sound covers both (#71).
     startRun() {
       runActive = true;
       musicLevel = 0;
       sentLevel = -1;
+      play('uiStart', MENU_EV, null);
       startMusic();
     },
+    // Pause and resume both come through here (#71). The click is the menu's acknowledgement.
     setPaused(paused) {
+      play('uiClick', MENU_EV, null);
       if (paused) stopMusic();
       else startMusic();
     },

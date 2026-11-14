@@ -312,6 +312,60 @@ test('reflected bullets kill the enemy they hit; the pulse also staggers nearby 
   assert.ok(drainEvents(g).some((ev) => ev.type === 'kill' && ev.enemyType === 'spitter' && ev.cause === 'reflect'));
 });
 
+test('a perfect pulse awards its bonus once, and an ordinary pulse awards nothing (#78)', () => {
+  const g = quiet();
+  place(g, W / 2, H / 2);
+  addBullet(g, W / 2 + 40, H / 2, -240, 0); // perfect: impact in ~0.11 s
+  const before = g.score;
+  update(g, pulseInput, SIM_DT);
+  const perfect = drainEvents(g).find((ev) => ev.type === 'perfectPulse');
+  assert.ok(perfect, 'perfect pulse fired');
+  assert.equal(perfect.points, PULSE.perfectBonus, 'the event carries the award');
+  assert.equal(g.score - before, PULSE.perfectBonus, 'the score rose by the bonus');
+
+  seconds(g, PULSE.cooldown + 0.1, NONE);
+  const ordinary = g.score;
+  addBullet(g, W / 2 + 80, H / 2, -240, 0); // not perfect
+  update(g, pulseInput, SIM_DT);
+  assert.ok(!drainEvents(g).some((ev) => ev.type === 'perfectPulse'), 'not a perfect pulse');
+  assert.equal(g.score, ordinary, 'an ordinary pulse adds no score');
+});
+
+test('a reflected bullet passes an idle mine: mines are not reflect targets (#81)', () => {
+  const g = quiet();
+  place(g, W / 2, H / 2);
+  const mine = spawnEnemy(g, 'mine', W / 2 + 200, H / 2); // outside armRange, so it stays idle
+  addBullet(g, W / 2 + 100, H / 2, -240, 0); // reflected at 100 px, flies back toward the mine
+  update(g, pulseInput, SIM_DT);
+  const events = drainEvents(g);
+  assert.ok(events.some((ev) => ev.type === 'reflect'), 'the bullet was reflected');
+  steps(g, 60);
+  assert.equal(mine.alive, true, 'the mine survives the reflected bullet');
+  assert.ok(!drainEvents(g).some((ev) => ev.type === 'kill' && ev.enemyType === 'mine'), 'no mine kill');
+});
+
+test('a spitter emits spitWindup before the shot it releases, so the shot is heard coming (#68)', () => {
+  const g = quiet();
+  place(g, W / 2, H / 2);
+  spawnEnemy(g, 'spitter', W / 2 + 300, H / 2);
+  const types = collect(g, ENEMY.spitter.firstShotDelay + ENEMY.spitter.windup + 0.1).map((ev) => ev.type);
+  const w = types.indexOf('spitWindup');
+  assert.ok(w >= 0, 'wind-up emitted');
+  assert.ok(types.indexOf('enemyShoot') > w, 'the shot comes after the wind-up');
+});
+
+test('a charger emits chargerTelegraph, then chargerLunge, both before the lunge reaches Rip (#69)', () => {
+  const g = quiet();
+  place(g, W / 2, H / 2);
+  const charger = spawnEnemy(g, 'charger', W / 2 + 300, H / 2);
+  charger.cooldown = 0; // charge at once
+  const types = collect(g, ENEMY.charger.telegraph + ENEMY.charger.lungeTime + 0.1).map((ev) => ev.type);
+  const t = types.indexOf('chargerTelegraph');
+  const l = types.indexOf('chargerLunge');
+  assert.ok(t >= 0, 'telegraph emitted');
+  assert.ok(l > t, 'lunge emitted after the telegraph');
+});
+
 test('spitter fires aimed bullets at the player on its interval', () => {
   const g = quiet();
   place(g, W / 2, H / 2);
@@ -642,6 +696,8 @@ const KNOWN = new Set([
   'gameOver', 'deflect', 'stagger', 'mineArm', 'mineExplode', 'bulletCut', 'enemyShoot', 'dashWhiff',
   // PICKUPS (#54): health recovery and modifier drop events.
   'pickupDrop', 'pickup', 'modifierEnd', 'heal', 'shieldBreak',
+  // Telegraphs (#68, #69): the wind-up and the charger's warning and lunge are events, so feedback can sound them.
+  'spitWindup', 'chargerTelegraph', 'chargerLunge',
 ]);
 
 const finite = (g) => {
