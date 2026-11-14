@@ -23,6 +23,7 @@ import { FX_PRESETS, SHAKE_MAX_OFFSET } from './fx.js';
 import { COMBO, LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H } from './config.js';
 import { ENEMY_KINDS, multiplierFor, tierFor } from './game.js';
 import { PALETTE } from './art.js';
+import { PICKUP_KINDS } from './pickups.js'; // PICKUPS (#54): colours and labels for the pickup rows
 
 // Every event type src/game.js can emit. test/feedback.test.js checks a fuzzed run against this.
 export const GAME_EVENT_TYPES = Object.freeze([
@@ -35,7 +36,21 @@ export const GAME_EVENT_TYPES = Object.freeze([
   'comboLost',
   'hurt',
   'waveStart',
+  'waveClear',
   'gameOver',
+  // PICKUPS (#54): presentation for these lives in pickups-art.js; sounds are a follow-up.
+  'pickupDrop',
+  'pickup',
+  'modifierEnd',
+  'heal',
+  'shieldBreak',
+  'bulletCut',
+  'enemyShoot',
+  'dashWhiff',
+  'deflect',
+  'stagger',
+  'mineArm',
+  'mineExplode',
 ]);
 
 const PAN_WIDTH = 0.8; // stereo pan at the arena edge; the centre is 0
@@ -104,11 +119,50 @@ export const PRESET_BURSTS = Object.freeze({
   ],
   chargeGlint: () => [{ count: 6, shape: 'spark', color: [PALETTE.dash, PALETTE.player], speed: 200, life: 0.3, size: 2, drag: 5 }],
   spawnMotes: (o) => [{ count: 8, shape: 'dot', color: o.color, speed: 90, life: 0.45, size: 2.4, drag: 3 }],
+  // A spitter releasing a shot: a few amber motes at the muzzle, matching the bullet colour.
+  spitShot: () => [{ count: 5, shape: 'dot', color: PALETTE.bullet, speed: 90, life: 0.25, size: 2.5, drag: 3 }],
+  // A dash that whiffed: a faint, short-lived puff at the end point. Quiet on purpose.
+  whiffPuff: () => [{ count: 6, shape: 'dot', color: '#7fd6ff', speed: 60, life: 0.3, size: 2, drag: 4 }],
 });
 
 // ---- the mapping table --------------------------------------------------------------------------
 // Matrix rows are cited inline. Values are the matrix's; the only deviation is noted where it occurs.
 export const FEEDBACK = Object.freeze({
+  // PICKUPS (#54). Sounds and presets are existing names; the pickup's own colour is passed through.
+  // A drop is a soft burst at the kill point. Nothing plays for the drop itself, so it stays quiet in a fight.
+  pickupDrop: {
+    preset: (ev) => ({ name: 'comboTierBloom', color: PICKUP_KINDS[ev.kind]?.color }),
+  },
+
+  // Collecting a pickup: chime, burst in its colour, a flash, and its name. Heal floaters come from pickups-art.js.
+  pickup: {
+    sound: (ev) => ({ name: 'comboTierUp', pitch: ev.kind === 'heal' ? 1.25 : 1, pan: panFor(ev.x) }),
+    preset: (ev) => ({ name: 'comboTierBloom', color: PICKUP_KINDS[ev.kind]?.color }),
+    flash: (ev) => [PICKUP_KINDS[ev.kind]?.color ?? '#ffffff', 0.1],
+    floater: (ev) => (ev.kind === 'heal' ? undefined : { text: PICKUP_KINDS[ev.kind]?.label ?? '', color: PICKUP_KINDS[ev.kind]?.color, life: 0.9, size: 20 }),
+  },
+
+  // A modifier running out: a soft tick, no burst.
+  modifierEnd: {
+    sound: () => ({ name: 'uiClick', pitch: 1, pan: 0 }),
+  },
+
+  // A heal: a green burst and a light shake. The +HP floater is drawn by pickups-art.js.
+  heal: {
+    sound: (ev) => ({ name: 'comboTierUp', pitch: 1.4, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'comboTierBloom', color: PICKUP_KINDS.heal.color }),
+    shake: () => 2,
+    flash: () => [PICKUP_KINDS.heal.color, 0.12],
+  },
+
+  // The Shield Scale absorbs a hit: the reflect clang, a white flash and a small shake. The white ring is drawn by pickups-art.js.
+  shieldBreak: {
+    sound: (ev) => ({ name: 'reflect', pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+    shake: () => 3,
+    flash: () => ['#ffffff', 0.12],
+  },
+
   // Dash start: whoosh, directional burst, white-hot flash. The trail runs per step in handleStep.
   dash: {
     sound: (ev) => ({ name: 'dash', pan: panFor(ev.x) }),
@@ -216,6 +270,60 @@ export const FEEDBACK = Object.freeze({
     flash: () => ['#050a18', 0.6],
     floater: () => ({ text: 'GAME OVER', color: PALETTE.danger, size: 48, life: 1.6 }),
     music: 'stop',
+  },
+
+  // A dash cut an enemy bullet: a short bright slice (the reflect clang, one octave-ish higher), a small spark burst.
+  // Score is +5 and gets no floater, so the spark is the only extra cue.
+  bulletCut: {
+    sound: (ev) => ({ name: 'reflect', pitch: 1.5, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+  },
+
+  // A spitter released its shot. Keeps the existing shot sound; the muzzle motes are new.
+  enemyShoot: {
+    sound: (ev) => ({ name: 'enemyShoot', pan: panFor(ev.x) }),
+    preset: (ev) => ({ name: 'spitShot' }),
+  },
+
+  // A dash that killed nothing but passed close to an enemy: a quiet dash whoosh and a faint puff. No shake, no floater.
+  dashWhiff: {
+    sound: (ev) => ({ name: 'dash', volume: 0.3, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'whiffPuff' }),
+  },
+
+  // Not in the DESIGN matrix (section 5 predates these sim events). Rows chosen here from existing sounds and presets.
+  // A Shellback's armour turned the dash: a low, short clank and a small jolt. The dash ends there, so no whoosh.
+  deflect: {
+    sound: (ev) => ({ name: 'reflect', pitch: 0.8, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+    shake: () => 3,
+  },
+
+  // Pulse staggered an enemy: a crisp tick and white sparks on the enemy.
+  stagger: {
+    sound: (ev) => ({ name: 'reflect', pitch: 1.25, volume: 0.5, pan: panFor(ev.x) }),
+    preset: (ev) => ({ name: 'chargeGlint' }),
+  },
+
+  // A mine armed when Rip came near: the arming tone and a magenta mote ring.
+  mineArm: {
+    sound: (ev) => ({ name: 'mineArm', pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: PALETTE.danger }),
+  },
+
+  // A mine detonated: the blast sound, an expanding ring, a short shake and a dim danger flash.
+  mineExplode: {
+    sound: (ev) => ({ name: 'mineExplode', pan: panFor(ev.x) }),
+    preset: () => ({ name: 'pulseRing' }),
+    shake: () => 6,
+    flash: () => [PALETTE.danger, 0.2],
+  },
+
+  // The wave is cleared and the next one is about to start: a gold bloom and a WAVE CLEAR banner.
+  waveClear: {
+    sound: () => ({ name: 'comboTierUp' }),
+    preset: () => ({ name: 'comboTierBloom', color: PALETTE.gold }),
+    floater: () => ({ text: 'WAVE CLEAR', color: PALETTE.gold, size: 32, life: 1.2 }),
   },
 
   // Synthetic: a charge refills (the count rises with no kill in the step). Not a kill refund.

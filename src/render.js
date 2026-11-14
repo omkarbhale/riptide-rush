@@ -2,8 +2,10 @@
 // by src/fx.js, and pulse shockwaves come from src/feedback.js. This module reads game and view state
 // and never writes into the simulation, so it can run at display rate while the sim steps at 120 Hz.
 import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, PULSE, SPAWN, ENEMY, PLAYER, DASH, RESTART_GATE } from './config.js';
-import { multiplierFor, comboWindowFor } from './game.js';
+import { multiplierFor, comboWindowFor, dashPreview } from './game.js';
 import { draw, PALETTE } from './art.js';
+import { dashMaxCharges } from './pickups.js'; // PICKUPS (#54)
+import { drawPickups, drawModifierHud } from './pickups-art.js'; // PICKUPS (#54)
 
 const FONT = '"Trebuchet MS", "Segoe UI", system-ui, sans-serif';
 const DIM = 'rgba(234, 255, 255, 0.6)';
@@ -97,6 +99,8 @@ function headingOf(e, dt) {
 
 // Telegraph progress 0..1 for kinds that have a telegraph in config (Charger today).
 function telegraphOf(e) {
+  // A spitter's wind-up rises 0 to 1 over its own timer (the sim exposes it as e.telegraph).
+  if (e.kind === 'spitter') return e.state === 'windup' ? clamp01(e.telegraph) : 0;
   const dur = ENEMY[e.kind]?.telegraph;
   if (!dur || e.state !== 'telegraph') return 0;
   return clamp01(1 - e.stateT / dur);
@@ -116,7 +120,7 @@ function popScale(e) {
 // A long dashed line along the locked lunge, so the danger reads from across the arena.
 function drawAimLine(ctx, e, x, y, tg, t) {
   const def = ENEMY[e.kind];
-  const len = (def?.lungeSpeed ?? 0) * (def?.lungeTime ?? 0);
+  const len = def?.aimLength ?? (def?.lungeSpeed ?? 0) * (def?.lungeTime ?? 0);
   if (len <= 0 || !(e.dirX || e.dirY)) return;
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
@@ -163,6 +167,43 @@ function drawBullets(ctx, game, view) {
     const y = lerp(b.py, b.y, view.alpha);
     draw.bullet(ctx, x, y, view.time, { reflected: b.owner === 'player', scale: 1 });
   }
+}
+
+// Afterglow after a dash, and an aim preview: a faint line and ring where the next dash would end,
+// brighter (gold) when it would kill. Reads state only.
+function drawDashFeedback(ctx, game) {
+  const p = game.player;
+  if (p.dashGrace > 0 && !p.dash.active) {
+    // Afterglow: a white-hot halo that fades and widens over the grace, so the safe window reads on screen.
+    const k = p.dashGrace / DASH.killGrace; // 1 at the dash end (or the kill), 0 when the grace is over
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.6 * k;
+    ctx.strokeStyle = PALETTE.dash;
+    ctx.shadowColor = PALETTE.dash;
+    ctx.shadowBlur = 24;
+    ctx.lineWidth = 3 + 4 * (1 - k);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, PLAYER.radius * (1.6 + 1.0 * (1 - k)), 0, TAU);
+    ctx.stroke();
+    ctx.restore();
+  }
+  if (p.dash.active || p.dash.charges < 1 || game.over) return;
+  const pv = dashPreview(game, p.aimX, p.aimY);
+  ctx.save();
+  ctx.strokeStyle = pv.kills ? PALETTE.gold : PALETTE.dash;
+  ctx.globalAlpha = pv.kills ? 0.9 : 0.3;
+  ctx.lineWidth = pv.kills ? 3 : 2;
+  ctx.setLineDash([6, 8]);
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+  ctx.lineTo(pv.x, pv.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(pv.x, pv.y, PLAYER.radius + 6, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawPlayer(ctx, game, view) {
@@ -232,6 +273,7 @@ function drawHud(ctx, game, highScore) {
     ctx.font = `600 15px ${FONT}`;
     ctx.fillText(`COMBO ${c.count}`, 28, 120);
   }
+  drawModifierHud(ctx, game); // PICKUPS (#54): active modifiers with countdown bars
 
   // Top right: wave and best.
   ctx.textAlign = 'right';
@@ -267,11 +309,12 @@ function drawHud(ctx, game, highScore) {
   // Bottom centre: dash charge pips. The pip being recharged fills as its timer runs.
   const d = game.player.dash;
   ctx.textAlign = 'center';
-  for (let i = 0; i < DASH.maxCharges; i++) {
-    const px = W / 2 - 52 + i * 52;
+  const maxCharges = dashMaxCharges(game); // PICKUPS (#54): 4 pips while Spark Coral is active
+  for (let i = 0; i < maxCharges; i++) {
+    const px = W / 2 - ((maxCharges - 1) * 52) / 2 + i * 52;
     const py = H - 42;
     const ready = i < d.charges;
-    const recharging = i === d.charges && d.charges < DASH.maxCharges;
+    const recharging = i === d.charges && d.charges < maxCharges;
     ctx.save();
     ctx.translate(px, py);
     ctx.rotate(Math.PI / 4);
@@ -410,8 +453,10 @@ export function drawFrame(ctx, view) {
     ctx.save();
     ctx.translate(shake.x, shake.y);
     drawWarnings(ctx, game, view.time);
+    drawPickups(ctx, game, view.alpha, view.time); // PICKUPS (#54): pickups, shield aura, pickup fx
     drawEnemies(ctx, game, view);
     drawBullets(ctx, game, view);
+    drawDashFeedback(ctx, game);
     drawPlayer(ctx, game, view);
     drawRings(ctx, view.rings);
     fx.drawWorld(ctx);
