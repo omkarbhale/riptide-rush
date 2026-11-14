@@ -17,20 +17,33 @@ import {
   clampOutOfRects,
   computeLayout,
   coveredBlocks,
+  countUp,
   createHud,
   drawHudLayer,
+  formatTime,
   gameOverEntries,
+  groupDigits,
+  summaryPanels,
+  howtoHit,
+  howtoLayout,
+  HOWTO_CARDS,
   hudBoxes,
   hudEvents,
   hudRectsLogical,
   hudUpdate,
+  loadHowtoSeen,
   loadSettings,
+  medalFor,
   normalizeSettings,
   pauseGeometry,
   pauseHit,
+  runRecord,
+  runStats,
+  saveHowtoSeen,
   saveSettings,
   setVolume,
   stepSetting,
+  SUMMARY_GATE,
   trackFraction,
 } from '../src/hud.js';
 
@@ -352,24 +365,46 @@ test('pause panel: the whole panel sits inside the window and clear of the pause
 
 // ---- game over ---------------------------------------------------------------------------------------
 
+// Width is approximated at 0.6 em per character; the anchor follows the line's alignment.
 function entryRect(e) {
   const approxW = e.text.length * e.size * 0.6;
-  return { id: e.id, x: e.x - approxW / 2, y: e.y - e.size / 2, w: approxW, h: e.size };
+  const left = e.align === 'left' ? e.x : e.align === 'right' ? e.x - approxW : e.x - approxW / 2;
+  return { id: e.id, x: left, y: e.y - e.size / 2, w: approxW, h: e.size };
 }
 
-test('game over: no two lines of text overlap, at each checked size, with and without NEW BEST', () => {
+// A summary with every stat present and a full five-row table, as the game would show it.
+function summaryInput(over = {}) {
+  return {
+    score: 123456,
+    highScore: 999999,
+    newBest: false,
+    overAge: 5,
+    time: 2,
+    stats: [
+      { label: 'WAVE REACHED', value: 14 },
+      { label: 'PEAK COMBO', value: 27 },
+      { label: 'BEST MULTI', value: 'x4' },
+      { label: 'KILLS', value: 312 },
+      { label: 'ACCURACY', value: '41%' },
+      { label: 'TIME', value: '3:12' },
+    ],
+    scores: [
+      { score: 999999, wave: 30, seconds: 500 },
+      { score: 400000, wave: 20, seconds: 300 },
+      { score: 200000, wave: 16, seconds: 210 },
+      { score: 90000, wave: null, seconds: null },
+      { score: 1500, wave: 3, seconds: 40 },
+    ],
+    runRank: 2,
+    ...over,
+  };
+}
+
+test('run summary: no two lines of text overlap, at each checked size, with and without NEW BEST', () => {
   for (const [w, h] of SIZES) {
     const L = computeLayout(w, h);
     for (const newBest of [false, true]) {
-      const entries = gameOverEntries(L, {
-        score: 123456,
-        highScore: 999999,
-        newBest,
-        wave: 14,
-        peakCombo: 27,
-        overAge: 5,
-        time: 2,
-      });
+      const entries = gameOverEntries(L, summaryInput({ newBest }));
       const rects = entries.map(entryRect);
       for (let i = 0; i < rects.length; i++) {
         for (let j = i + 1; j < rects.length; j++) {
@@ -503,4 +538,185 @@ test('game-over: the prompt is only shown after the restart gate', () => {
   assert.equal(early.some((e) => e.id === 'prompt'), false);
   assert.equal(late.some((e) => e.id === 'prompt'), true);
   assert.ok(late.find((e) => e.id === 'prompt').alpha >= 0.6);
+});
+
+// ---- run summary, first-run how-to and title (#110) ------------------------------------------------
+
+test('run summary: a stat the game does not expose is left out, not shown blank', () => {
+  const game = createGame(7);
+  game.wave.number = 4;
+  const hud = createHud();
+  const labels = runStats(game, hud).map((s) => s.label);
+  assert.ok(labels.includes('WAVE REACHED'));
+  assert.ok(!labels.includes('ACCURACY'), 'no dashes yet, so no accuracy');
+  assert.ok(!labels.includes('BEST MULTI'), 'no kills yet, so no best multi');
+  hud.dashes = 4;
+  hud.killDashes = 1;
+  hud.bestChain = 3;
+  const full = runStats(game, hud);
+  assert.equal(full.find((s) => s.label === 'ACCURACY').value, '25%');
+  assert.equal(full.find((s) => s.label === 'BEST MULTI').value, 'x3');
+  const bare = runStats({ score: 0, kills: 2, time: 61 }, hud);
+  assert.ok(!bare.some((s) => s.label === 'WAVE REACHED'), 'a game with no wave omits the wave stat');
+  assert.equal(bare.find((s) => s.label === 'TIME').value, '1:01');
+});
+
+test('run summary: the medal follows the score thresholds, with none below bronze', () => {
+  assert.equal(medalFor(999), null);
+  assert.equal(medalFor(1000).id, 'bronze');
+  assert.equal(medalFor(4999).id, 'bronze');
+  assert.equal(medalFor(5000).id, 'silver');
+  assert.equal(medalFor(15000).id, 'gold');
+  assert.equal(medalFor(30000).id, 'abyssal');
+});
+
+test('run summary: the count-up starts at zero, never passes the score, and lands on it', () => {
+  assert.equal(countUp(5000, 0), 0);
+  let last = 0;
+  for (let age = 0; age <= 2; age += 0.05) {
+    const v = countUp(5000, age);
+    assert.ok(v >= last && v <= 5000, `age ${age}: ${v}`);
+    last = v;
+  }
+  assert.equal(countUp(5000, 2), 5000);
+});
+
+test('run summary: this run is highlighted by its rank, and a run off the table is shown beside it', () => {
+  const L = computeLayout(1280, 720);
+  const onTable = gameOverEntries(L, summaryInput({ runRank: 2 }));
+  assert.equal(onTable.find((e) => e.id === 'tscore2').weight, 'bold');
+  assert.equal(onTable.find((e) => e.id === 'tscore0').weight, '600');
+  assert.equal(onTable.some((e) => e.id === 'thisRun'), false, 'a run on the table needs no side note');
+  const off = gameOverEntries(L, summaryInput({ runRank: -1, score: 777 }));
+  assert.equal(off.find((e) => e.id === 'thisRun').text, 'This run  777');
+  const empty = gameOverEntries(L, summaryInput({ scores: [], runRank: 0 }));
+  assert.equal(empty.find((e) => e.id === 'tscore0').text, '—', 'an empty table row shows a dash');
+});
+
+test('run summary: best multi-kill and accuracy come from the kill and dash events', () => {
+  const game = createGame(3);
+  const hud = createHud();
+  hudEvents(
+    hud,
+    [
+      { type: 'dash' },
+      { type: 'kill', multi: 1, cause: 'dash' },
+      { type: 'kill', multi: 2, cause: 'dash' },
+      { type: 'kill', multi: 3, cause: 'dash' },
+      { type: 'dash' },
+      { type: 'bulletCut' },
+      { type: 'dash' },
+      { type: 'kill', multi: 1, cause: 'shockwave' },
+      { type: 'dash' },
+      { type: 'kill', multi: 1, cause: 'defuse' },
+    ],
+    game,
+  );
+  assert.equal(hud.bestChain, 3);
+  assert.equal(hud.dashes, 4);
+  assert.equal(hud.killDashes, 2, 'the first dash and the mine it defused count; the pulse and the miss do not');
+});
+
+test('run record: carries the score, wave, kills, peak combo, best multi and time the list stores', () => {
+  const game = createGame(3);
+  game.score = 4200;
+  game.kills = 17;
+  game.time = 61.4;
+  game.wave.number = 6;
+  const hud = createHud();
+  hud.peakCombo = 9;
+  hud.bestChain = 4;
+  assert.deepEqual(runRecord(game, hud, 1000), { score: 4200, wave: 6, kills: 17, peakCombo: 9, chain: 4, seconds: 61.4, at: 1000 });
+});
+
+test('run summary: the restart gate is 300 ms, and the prompt waits for it', () => {
+  assert.equal(SUMMARY_GATE, 0.3);
+  const L = computeLayout(1280, 720);
+  assert.equal(gameOverEntries(L, summaryInput({ overAge: 0.29 })).some((e) => e.id === 'prompt'), false);
+  assert.equal(gameOverEntries(L, summaryInput({ overAge: 0.3 })).some((e) => e.id === 'prompt'), true);
+});
+
+test('how-to: three cards, and only the skip button counts as a skip click', () => {
+  assert.equal(HOWTO_CARDS.length, 3);
+  for (const [w, h] of SIZES) {
+    const L = computeLayout(w, h);
+    const g = howtoLayout(L);
+    assert.equal(howtoHit(L, g.skip.x + g.skip.w / 2, g.skip.y + g.skip.h / 2), 'skip', `${w}x${h}`);
+    assert.equal(howtoHit(L, g.card.x + g.card.w / 2, g.card.y + g.card.h / 2), null, `${w}x${h}: the card body is not skip`);
+  }
+});
+
+test('how-to: the seen flag is saved and read back, and blocked storage reads as not seen', () => {
+  const store = new Map();
+  const storage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) };
+  assert.equal(loadHowtoSeen(storage), false);
+  saveHowtoSeen(storage);
+  assert.equal(loadHowtoSeen(storage), true);
+  const blocked = {
+    getItem() {
+      throw new Error('denied');
+    },
+    setItem() {
+      throw new Error('denied');
+    },
+  };
+  assert.equal(loadHowtoSeen(blocked), false);
+  assert.doesNotThrow(() => saveHowtoSeen(blocked));
+});
+
+test('pause menu: the how-to row is last, sits inside the panel, and is clickable at each size', () => {
+  assert.ok(OPTION_ROWS.includes('howto'));
+  for (const [w, h] of SIZES) {
+    const L = computeLayout(w, h);
+    const g = pauseGeometry(L);
+    const last = g.rows[g.rows.length - 1];
+    assert.equal(last.id, 'howto');
+    assert.ok(last.y + last.h <= g.panel.y + g.panel.h, `${w}x${h}: the how-to row is inside the panel`);
+    assert.ok(g.panel.y + g.panel.h <= h, `${w}x${h}: the panel is inside the window`);
+    assert.deepEqual(pauseHit(L, g.panel.x + g.panel.w / 2, last.cy), { row: OPTION_ROWS.length - 1, part: 'row' });
+  }
+});
+
+test('draw: the title draws at each checked size with a best score and with none', () => {
+  for (const [w, h] of SIZES) {
+    const L = computeLayout(w, h);
+    for (const highScore of [0, 4200]) {
+      const { ctx, fonts } = stubCtx(w, h);
+      drawHudLayer(ctx, L, { screen: 'title', game: null, time: 1.3, highScore, settings: DEFAULT_SETTINGS, menuRow: 0 });
+      assert.ok(fonts.length > 0, `${w}x${h}: the title drew text`);
+      for (const f of fonts) assert.ok(px(f) >= 12, `${w}x${h} title: font "${f}" is under 12 CSS px`);
+    }
+  }
+});
+
+test('draw: every how-to card draws at each checked size, with the animations at several times', () => {
+  for (const [w, h] of SIZES) {
+    const L = computeLayout(w, h);
+    for (let i = 0; i < HOWTO_CARDS.length; i++) {
+      for (const time of [0.2, 1.1, 2.4]) {
+        const { ctx, fonts } = stubCtx(w, h);
+        drawHudLayer(ctx, L, { screen: 'howto', howtoIndex: i, time, game: null, settings: DEFAULT_SETTINGS, menuRow: 0 });
+        assert.ok(fonts.length > 0, `${w}x${h} card ${i}: drew text`);
+        for (const f of fonts) assert.ok(px(f) >= 12, `${w}x${h} card ${i}: font "${f}" is under 12 CSS px`);
+      }
+    }
+  }
+});
+
+test('run summary: every stat and table line sits inside its own panel, at each checked size', () => {
+  for (const [w, h] of SIZES) {
+    const L = computeLayout(w, h);
+    const panels = summaryPanels(L);
+    for (const e of gameOverEntries(L, summaryInput())) {
+      // Upper-case labels run wider than the 0.6 em estimate, so this check uses 0.75 em per character.
+      const wide = e.text.length * e.size * 0.75;
+      const left0 = e.align === 'left' ? e.x : e.align === 'right' ? e.x - wide : e.x - wide / 2;
+      const r = { x: left0, w: wide };
+      const inLeft = e.id.startsWith('stat') || e.id === 'score' || e.id === 'scoreLabel' || e.id === 'medal';
+      const inRight = /^(rank|tscore|twave|ttime|hScore|hWave|hTime)/.test(e.id) || e.id === 'thisRun' || e.id === 'tableHead';
+      if (!inLeft && !inRight) continue;
+      const p = inLeft ? panels.left : panels.right;
+      assert.ok(r.x >= p.x && r.x + r.w <= p.x + p.w, `${w}x${h}: ${e.id} "${e.text}" spills out of its panel`);
+    }
+  }
 });
