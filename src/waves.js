@@ -1,8 +1,8 @@
 // Wave script for Riptide Rush. Pure data and functions: no DOM, no window, no game state.
 // Source: docs/design/enemies-and-waves.md, Part 3.1 (waves 1-20) and Part 3.2 (beyond 20).
-// Only the kinds that exist in the simulation are scripted: drifter, spitter, charger, shellback,
-// splitter, mine. The design's puffer, shield bearer, lobber, eel and boss rows are dropped, so some
-// waves are smaller than the design table. Splitter minis are not scripted; the splitter makes them.
+// Scripted kinds: drifter, spitter, charger, shellback, splitter, mine, and (#114) puffer, shieldbearer,
+// inksquid, phaseeel and the warden boss. The second round enters one kind at a time from wave 10 at
+// low counts; no existing kind's count changes. Splitter minis are not scripted; the splitter makes them.
 //
 // A wave is released as schools (#97). A school is one spawn: Drifters come in schools of 4-8 that
 // swim in a formation (line, wedge or ring), and every other kind comes alone (a school of one).
@@ -10,7 +10,25 @@
 
 import { SPAWN } from './config.js';
 
-export const SCRIPTED_KINDS = ['drifter', 'spitter', 'charger', 'shellback', 'splitter', 'mine'];
+export const SCRIPTED_KINDS = [
+  'drifter',
+  'spitter',
+  'charger',
+  'shellback',
+  'splitter',
+  'mine',
+  'puffer',
+  'shieldbearer',
+  'inksquid',
+  'phaseeel',
+  'warden',
+];
+
+// The boss each boss wave holds for (#114). A boss wave ends when its boss dies.
+export const BOSS_WAVES = Object.freeze({ 10: 'warden', 20: 'warden' });
+
+// Kinds that only the table scripts: past wave 20 the budget never buys them.
+const TABLE_ONLY_KINDS = ['puffer', 'shieldbearer', 'inksquid', 'phaseeel', 'warden'];
 
 export const LAST_TABLE_WAVE = 20;
 
@@ -26,21 +44,35 @@ export const WAVE_TABLE = [
   { wave: 7, intensity: 4, release: false, cadence: 0.20, counts: { drifter: 210, mine: 3 } },
   { wave: 8, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 210, spitter: 2, shellback: 2 } },
   { wave: 9, intensity: 5, release: true, cadence: 0.20, counts: { drifter: 240 } },
-  { wave: 10, intensity: 8, release: false, cadence: 0.20, counts: { drifter: 210, splitter: 2, shellback: 2 } },
+  { wave: 10, intensity: 8, release: false, cadence: 0.20, counts: { drifter: 210, splitter: 2, shellback: 2 , warden: 1} },
   { wave: 11, intensity: 3, release: true, cadence: 0.20, counts: { drifter: 210, spitter: 2, charger: 2 } },
-  { wave: 12, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 210, shellback: 1 } },
-  { wave: 13, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 180, shellback: 2, spitter: 1 } },
-  { wave: 14, intensity: 7, release: false, cadence: 0.20, counts: { drifter: 180, charger: 4 } }, // #88: was two chargers
+  { wave: 12, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 210, shellback: 1 , puffer: 2} },
+  { wave: 13, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 180, shellback: 2, spitter: 1 , shieldbearer: 1} },
+  { wave: 14, intensity: 7, release: false, cadence: 0.20, counts: { drifter: 180, charger: 4 , inksquid: 1} }, // #88: was two chargers
   { wave: 15, intensity: 4, release: true, cadence: 0.20, counts: { drifter: 240, shellback: 2 } },
-  { wave: 16, intensity: 7, release: false, cadence: 0.20, counts: { drifter: 150, splitter: 2, mine: 4, spitter: 1 } },
+  { wave: 16, intensity: 7, release: false, cadence: 0.20, counts: { drifter: 150, splitter: 2, mine: 4, spitter: 1 , phaseeel: 1} },
   { wave: 17, intensity: 8, release: false, cadence: 0.20, counts: { drifter: 180, charger: 4, shellback: 4 } },
   { wave: 18, intensity: 5, release: true, cadence: 0.20, counts: { drifter: 240, spitter: 3, shellback: 2 } },
   { wave: 19, intensity: 9, release: false, cadence: 0.20, counts: { drifter: 150, charger: 4, splitter: 3, spitter: 3, mine: 4 } },
-  { wave: 20, intensity: 10, release: false, cadence: 0.20, counts: { drifter: 210, spitter: 3, charger: 3, shellback: 4 } },
+  { wave: 20, intensity: 10, release: false, cadence: 0.20, counts: { drifter: 210, spitter: 3, charger: 3, shellback: 4 , warden: 1} },
 ];
 
-// Point cost per enemy, from Part 3.2. The boss (25 points) is not in the script.
-export const POINT_COSTS = { drifter: 1, mine: 1, spitter: 2, splitter: 3, charger: 3, shellback: 5 };
+// Point cost per enemy, from Part 3.2.
+// The #114 kinds carry their design costs (Part 3.2) so every kind has one. The budget past wave 20 never
+// buys them (TABLE_ONLY_KINDS), so their counts there are zero.
+export const POINT_COSTS = {
+  drifter: 1,
+  mine: 1,
+  spitter: 2,
+  splitter: 3,
+  charger: 3,
+  shellback: 5,
+  puffer: 2,
+  shieldbearer: 4,
+  inksquid: 3,
+  phaseeel: 4,
+  warden: 25,
+};
 
 // How a wave beyond 20 splits its point budget between kinds. Leftover points go to drifters.
 const BEYOND_SHARES = { drifter: 0.6, spitter: 0.12, charger: 0.08, mine: 0.02, splitter: 0.06, shellback: 0.12 };
@@ -87,7 +119,8 @@ export function countsFor(wave) {
   const scale = isReleaseWave(wave) ? RELEASE_BUDGET_SHARE : 1;
   const budget = Math.floor(budgetFor(wave) * scale);
   let spent = 0;
-  for (const kind of SCRIPTED_KINDS) {
+  for (const kind of TABLE_ONLY_KINDS) counts[kind] = 0;
+  for (const kind of Object.keys(BEYOND_SHARES)) {
     const n = Math.floor((budget * BEYOND_SHARES[kind]) / POINT_COSTS[kind]);
     counts[kind] = n;
     spent += n * POINT_COSTS[kind];
@@ -153,6 +186,7 @@ export function planWave(wave) {
   return {
     wave,
     release: isReleaseWave(wave),
+    boss: BOSS_WAVES[wave] ?? null,
     cadence: cadenceFor(wave),
     counts,
     schoolCap: cap,

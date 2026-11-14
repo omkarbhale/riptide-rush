@@ -11,7 +11,8 @@
 //   hitstop(ev)  -> peak hit-stop in ms
 //   flash(ev)    -> [color, alpha]
 //   slowmo(ev)   -> [timeScale, ms]
-//   floater(ev)  -> { text, color, size?, life?, delay? (ms) }
+//   soundLayer(ev) -> { name, pitch?, volume?, pan? }     a second voice for the same event, optional
+//   floater(ev)  -> { text, color, size?, life?, delay? (ms), lift? (px above the event) }
 //   ring(ev)     -> { life, perfect }                      pulse shockwave drawn with draw.pulse
 //   music        -> 'stop'                                 stops the music bus
 // Shake and hit-stop are peaks. Kills inside one dash form a batch, and a batch applies only the
@@ -55,15 +56,39 @@ export const GAME_EVENT_TYPES = Object.freeze([
   'chargerTelegraph',
   'chargerLunge',
   'hint', // one-time lesson text (#84): the first Spitter wind-up or the first Shellback
+  // #114: the second round of enemies (enemies-extra.js). Each reuses an existing sound and preset.
+  'puffSwell',
+  'puffBurst',
+  'bearerHit',
+  'barrierBreak',
+  'lobThrow',
+  'lobLand',
+  'lobReflect',
+  'lobDeflect',
+  'puddleDispel',
+  'eelRipple',
+  'eelSurface',
+  'eelBite',
+  'eelHide',
+  'eelStun',
+  'lureSpawn',
+  'bossIntro',
+  'bossTelegraph',
+  'bossExpose',
+  'bossHit',
+  'bossPhase',
+  'bossStun',
+  'bossDown',
 ]);
 
 const SPAWN_BURST_WINDOW_S = 0.2; // spawn markers closer than this (sim seconds) belong to one burst (#79)
 const MENU_EV = Object.freeze({ x: W / 2, y: H / 2 }); // menu sounds are centred: they have no arena position
 
 const PAN_WIDTH = 0.8; // stereo pan at the arena edge; the centre is 0
-const PITCH_PER_COMBO = 0.02; // kill chime: 1 + 0.02 * min(combo, 30)
-const PITCH_COMBO_CAP = 30;
-const MAX_KILL_PITCH = 2; // +12 semitones
+const KILL_PITCH_CAP_SEMITONES = 12; // the kill chime climbs one semitone per combo step, up to one octave (#14)
+export const KILL_PITCH_CAP = 2 ** (KILL_PITCH_CAP_SEMITONES / 12); // 2.0x, reached at combo 12 and held after
+const SHIP_CLEAR_LIFT_PX = 36; // player-centred floaters start this far above Rip, so they do not cover the ship (#98)
+const STAGGER_COLOR = '#ffffff'; // the stagger ring: white, not an enemy hue and not the danger magenta (#17)
 const KILL_SHAKE_PX = [3, 6, 8, 10, 12]; // peak per dash batch, by kill count (1..5+)
 const KILL_HITSTOP_MS = [40, 50, 60, 70]; // peak per dash batch, by kill count (1..4+)
 const BIG_KILL_BASE = 150; // base score from which the kill burst is the large one
@@ -82,9 +107,10 @@ export function panFor(x) {
   return clamp((x / W) * 2 - 1, -1, 1) * PAN_WIDTH;
 }
 
-// Kill chime pitch rises with the combo and never exceeds +12 semitones.
+// Kill chime pitch: one semitone per combo step, held at KILL_PITCH_CAP (+12 semitones) from combo 12 on.
 export function killPitch(combo) {
-  return Math.min(MAX_KILL_PITCH, 1 + PITCH_PER_COMBO * Math.min(Math.max(0, combo), PITCH_COMBO_CAP));
+  const steps = Math.min(Math.max(0, combo), KILL_PITCH_CAP_SEMITONES);
+  return 2 ** (steps / 12);
 }
 
 const killShakePx = (n) => KILL_SHAKE_PX[Math.min(n, KILL_SHAKE_PX.length) - 1];
@@ -119,11 +145,13 @@ export const PRESET_BURSTS = Object.freeze({
   comboDrain: (o) => [{ count: 14, shape: 'dot', color: o.color, speed: 200, life: 0.5, size: 3, drag: 2.5 }],
   // The arena sweep: one ring that crosses the whole arena.
   waveSweep: () => [{ count: 1, shape: 'ring', color: PALETTE.player, speed: 820, life: 0.9, size: 6 }],
-  // Approximation: fx has no implode primitive, so this is an outward shockwave plus shards (see the issue filed with this PR).
+  // DESIGN §5 gameover_implode: particles start on a ring and collapse inward (fx.collapse, #56).
   gameOverImplode: () => [
-    { count: 1, shape: 'ring', color: PALETTE.danger, speed: 520, life: 0.8, size: 8 },
-    { count: 22, shape: 'shard', color: [PALETTE.danger, PALETTE.bullet], speed: 260, life: 0.9, size: 6, drag: 2.2 },
+    { count: 26, shape: 'shard', color: [PALETTE.danger, PALETTE.bullet], collapse: 240, life: 0.9, size: 6 },
+    { count: 14, shape: 'dot', color: PALETTE.dash, collapse: 300, life: 0.8, size: 3 },
   ],
+  // A stagger (#17): one white ring that opens over 0.4 s. The kill's cyan ring is fast and short; this one is slow and white.
+  staggerRing: () => [{ count: 1, shape: 'ring', color: STAGGER_COLOR, speed: 120, life: 0.4, size: 3 }],
   chargeGlint: () => [{ count: 6, shape: 'spark', color: [PALETTE.dash, PALETTE.player], speed: 200, life: 0.3, size: 2, drag: 5 }],
   spawnMotes: (o) => [{ count: 8, shape: 'dot', color: o.color, speed: 90, life: 0.45, size: 2.4, drag: 3 }],
   // A spitter releasing a shot: a few amber motes at the muzzle, matching the bullet colour.
@@ -144,29 +172,31 @@ export const FEEDBACK = Object.freeze({
   },
 
   // Collecting a pickup: chime, burst in its colour, a flash, and its name. Heal floaters come from pickups-art.js.
+  // A heal collect also emits a heal event in the same step, so this row is silent for heal: the heal row
+  // announces it once (#121 "nothing is announced twice").
   pickup: {
-    sound: (ev) => ({ name: 'comboTierUp', pitch: ev.kind === 'heal' ? 1.25 : 1, pan: panFor(ev.x) }),
-    preset: (ev) => ({ name: 'comboTierBloom', color: PICKUP_KINDS[ev.kind]?.color }),
-    flash: (ev) => [PICKUP_KINDS[ev.kind]?.color ?? '#ffffff', 0.1],
-    floater: (ev) => (ev.kind === 'heal' ? undefined : { text: PICKUP_KINDS[ev.kind]?.label ?? '', color: PICKUP_KINDS[ev.kind]?.color, life: 0.9, size: 20 }),
+    sound: (ev) => (ev.kind === 'heal' ? null : { name: 'pickup', pan: panFor(ev.x) }),
+    preset: (ev) => (ev.kind === 'heal' ? null : { name: 'comboTierBloom', color: PICKUP_KINDS[ev.kind]?.color }),
+    flash: (ev) => (ev.kind === 'heal' ? null : [PICKUP_KINDS[ev.kind]?.color ?? '#ffffff', 0.1]),
+    floater: (ev) => (ev.kind === 'heal' ? null : { text: PICKUP_KINDS[ev.kind]?.label ?? '', color: PICKUP_KINDS[ev.kind]?.color, life: 0.9, size: 20 }),
   },
 
-  // A modifier running out: a soft tick, no burst.
+  // A modifier running out: a power-down tick, no burst.
   modifierEnd: {
-    sound: () => ({ name: 'uiClick', pitch: 1, pan: 0 }),
+    sound: () => ({ name: 'modifierEnd' }),
   },
 
-  // A heal: a green burst and a light shake. The +HP floater is drawn by pickups-art.js.
+  // A heal: its own sound, a green burst and a light shake. The +HP floater is drawn by pickups-art.js.
   heal: {
-    sound: (ev) => ({ name: 'comboTierUp', pitch: 1.4, pan: panFor(ev.x) }),
+    sound: (ev) => ({ name: 'heal', pan: panFor(ev.x) }),
     preset: () => ({ name: 'comboTierBloom', color: PICKUP_KINDS.heal.color }),
     shake: () => 2,
     flash: () => [PICKUP_KINDS.heal.color, 0.12],
   },
 
-  // The Shield Scale absorbs a hit: the reflect clang, a white flash and a small shake. The white ring is drawn by pickups-art.js.
+  // The Shield Scale absorbs a hit: its own glass-break sound, a white flash and a small shake. The white ring is drawn by pickups-art.js.
   shieldBreak: {
-    sound: (ev) => ({ name: 'reflect', pan: panFor(ev.x) }),
+    sound: (ev) => ({ name: 'shieldBreak', pan: panFor(ev.x) }),
     preset: () => ({ name: 'reflectSpark' }),
     shake: () => 3,
     flash: () => ['#ffffff', 0.12],
@@ -182,6 +212,9 @@ export const FEEDBACK = Object.freeze({
   // Single kill row. Used for every kill; a dash batch adds the multi-kill rows on top.
   kill: {
     sound: (ev) => ({ name: 'kill', pitch: killPitch(ev.combo), pan: panFor(ev.x) }),
+    // Past the cap the pitch holds, and a second, quieter kill voice at the cap pitch is layered on top, so the
+    // chain keeps growing in weight after it stops rising in pitch (#14).
+    soundLayer: (ev) => (killPitch(ev.combo) >= KILL_PITCH_CAP ? { name: 'kill', pitch: KILL_PITCH_CAP, volume: 0.5, pan: panFor(ev.x) } : null),
     preset: (ev) => ({ name: killBase(ev.enemyType) < BIG_KILL_BASE ? 'killSmall' : 'killLarge', color: enemyColor(ev.enemyType) }),
     shake: (ev) => killShakePx(ev.n),
     hitstop: (ev) => killHitstopMs(ev.n),
@@ -216,14 +249,14 @@ export const FEEDBACK = Object.freeze({
     ring: () => ({ life: 0.3, perfect: false }),
   },
 
-  // Perfect pulse: time scale 0.35 for 200 ms instead of hit-stop. The floater shows the award the sim made (#78).
+  // Perfect pulse: its sound, shatter, shake and flash. The slow-motion is the sim's alone (game.slowmo, #104):
+  // this row adds no second time scale. The floater shows the award the sim made (#78).
   perfectPulse: {
     sound: () => ({ name: 'perfectPulse' }),
     preset: () => ({ name: 'perfectShatter' }),
     shake: () => 5,
-    slowmo: () => [0.35, 200],
     flash: () => ['#ffffff', 0.25],
-    floater: (ev) => ({ text: ev.points ? `PERFECT PULSE +${ev.points}` : 'PERFECT PULSE', color: PALETTE.gold, size: 26, life: 0.9 }),
+    floater: (ev) => ({ text: ev.points ? `PERFECT PULSE +${ev.points}` : 'PERFECT PULSE', color: PALETTE.gold, size: 26, life: 0.9, lift: SHIP_CLEAR_LIFT_PX }),
     ring: () => ({ life: 0.45, perfect: true }),
   },
 
@@ -237,28 +270,28 @@ export const FEEDBACK = Object.freeze({
   },
 
   // Combo tier up (tier > 0). A drop to tier 0 comes with comboLost, which has its own row.
+  // Player-centred floaters use `lift` so they start above Rip (#98). Floaters draw over the ship in render.js.
   comboTier: {
     sound: (ev) => (ev.tier > 0 ? { name: 'comboTierUp' } : null),
     preset: (ev) => (ev.tier > 0 ? { name: 'comboTierBloom', color: tierColorAt(ev.tier) } : null),
     shake: (ev) => (ev.tier > 0 ? 4 : 0),
     flash: (ev) => (ev.tier > 0 ? [tierColorAt(ev.tier), 0.15] : null),
-    floater: (ev) => (ev.tier > 0 ? { text: `COMBO ${ev.combo}`, color: tierColorAt(ev.tier), size: 30, life: 1.0 } : null),
+    floater: (ev) => (ev.tier > 0 ? { text: `COMBO ${ev.combo}`, color: tierColorAt(ev.tier), size: 30, life: 1.0, lift: SHIP_CLEAR_LIFT_PX } : null),
   },
 
   comboLost: {
     sound: () => ({ name: 'comboLost' }),
     preset: () => ({ name: 'comboDrain', color: PALETTE.danger }),
     shake: () => 2,
-    floater: () => ({ text: 'COMBO LOST', color: PALETTE.danger, size: 26, life: 0.9 }),
+    floater: () => ({ text: 'COMBO LOST', color: PALETTE.danger, size: 26, life: 0.9, lift: SHIP_CLEAR_LIFT_PX }),
   },
 
-  // Wave banner: a sweep across the arena, a cyan flash and the wave number.
+  // Wave start: a sweep across the arena, a cyan flash and the wave sound. The WAVE n banner is the HUD's (#98), not a floater.
   waveStart: {
     sound: () => ({ name: 'waveStart' }),
     preset: () => ({ name: 'waveSweep' }),
     shake: () => 3,
     flash: () => [PALETTE.player, 0.1],
-    floater: (ev) => ({ text: `WAVE ${ev.wave}`, color: PALETTE.player, size: 40, life: 1.4 }),
   },
 
   // Hurt: thud, magenta spark burst, the strongest shake and hit-stop, a magenta flash, -1 HP.
@@ -268,22 +301,22 @@ export const FEEDBACK = Object.freeze({
     shake: () => 10,
     hitstop: () => 70,
     flash: () => [PALETTE.danger, 0.35],
-    floater: () => ({ text: '-1 HP', color: PALETTE.danger, size: 26, life: 0.8 }),
+    floater: () => ({ text: '-1 HP', color: PALETTE.danger, size: 26, life: 0.8, lift: SHIP_CLEAR_LIFT_PX }),
   },
 
-  // Game over: the sink sound, the implode burst, a dark flash, and the music stops.
+  // Game over: the sink sound, the inward implode, a dark flash, and the music stops. No floater: the game-over
+  // screen already says WRECKED, so a second message only overlapped it (#77).
   gameOver: {
     sound: () => ({ name: 'gameOver' }),
     preset: () => ({ name: 'gameOverImplode' }),
     flash: () => ['#050a18', 0.6],
-    floater: () => ({ text: 'GAME OVER', color: PALETTE.danger, size: 48, life: 1.6 }),
     music: 'stop',
   },
 
-  // A dash cut an enemy bullet: a short bright slice (the reflect clang, one octave-ish higher), a small spark burst.
-  // Score is +5 and gets no floater, so the spark is the only extra cue.
+  // A dash cut an enemy bullet: its own bright slice sound and a small spark burst. Score is +5 and gets no floater,
+  // so the spark is the only extra cue.
   bulletCut: {
-    sound: (ev) => ({ name: 'reflect', pitch: 1.5, pan: panFor(ev.x) }),
+    sound: (ev) => ({ name: 'bulletCut', pan: panFor(ev.x) }),
     preset: () => ({ name: 'reflectSpark' }),
   },
 
@@ -293,15 +326,15 @@ export const FEEDBACK = Object.freeze({
     preset: (ev) => ({ name: 'spitShot' }),
   },
 
-  // A spitter winds up a shot (#68, #69 spirit): a quieter, higher whine at the muzzle, so the shot is heard
-  // before it leaves. The shot itself is enemyShoot above.
+  // A spitter winds up a shot (#68, #69 spirit): its own wind-up sound at full level, so the threat is heard before
+  // the shot leaves (threats are louder and earlier than rewards). The shot itself is enemyShoot above.
   spitWindup: {
-    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 1.5, volume: 0.35, pan: panFor(ev.x) }),
+    sound: (ev) => ({ name: 'spitterWindup', pan: panFor(ev.x) }),
   },
 
-  // The one-time hint (#84): a soft tick and a gold floater that names the lesson, over Rip.
+  // The one-time hint (#84): its own soft bell and a gold floater that names the lesson, over Rip.
   hint: {
-    sound: () => ({ name: 'uiClick', pitch: 1.4, pan: 0 }),
+    sound: () => ({ name: 'hint' }),
     floater: (ev) => ({ text: ev.text, color: PALETTE.gold, life: 2.2, size: 18 }),
   },
 
@@ -317,7 +350,7 @@ export const FEEDBACK = Object.freeze({
 
   // A dash that killed nothing but passed close to an enemy: a quiet dash whoosh and a faint puff. No shake, no floater.
   dashWhiff: {
-    sound: (ev) => ({ name: 'dash', volume: 0.3, pan: panFor(ev.x) }),
+    sound: (ev) => ({ name: 'dashWhiff', volume: 0.3, pan: panFor(ev.x) }), // quiet on purpose: a whiff is not a hit
     preset: () => ({ name: 'whiffPuff' }),
   },
 
@@ -325,7 +358,7 @@ export const FEEDBACK = Object.freeze({
   // A Shellback's armour turned the dash (#67): a low clang at the contact point, a jolt, a white flash, and an
   // ARMOUR floater so the bounce reads as a deliberate block. The dash ends there, so no whoosh.
   deflect: {
-    sound: (ev) => ({ name: 'reflect', pitch: 0.8, pan: panFor(ev.x) }),
+    sound: (ev) => ({ name: 'deflect', pan: panFor(ev.x) }),
     preset: () => ({ name: 'reflectSpark' }),
     shake: () => 6,
     hitstop: () => 35,
@@ -333,10 +366,11 @@ export const FEEDBACK = Object.freeze({
     floater: () => ({ text: 'ARMOUR', color: '#9fb4c8', size: 22, life: 0.6 }),
   },
 
-  // Pulse staggered an enemy: a crisp tick and white sparks on the enemy.
+  // Pulse staggered an enemy (#17): a knock and a white ring that opens for 0.4 s. It is not the kill: no burst,
+  // no floater, and no flash, so "vulnerable" and "dead" read differently at a glance.
   stagger: {
-    sound: (ev) => ({ name: 'reflect', pitch: 1.25, volume: 0.5, pan: panFor(ev.x) }),
-    preset: (ev) => ({ name: 'chargeGlint' }),
+    sound: (ev) => ({ name: 'stagger', pan: panFor(ev.x) }),
+    preset: () => ({ name: 'staggerRing' }),
   },
 
   // A mine armed when Rip came near: the arming tone and a magenta mote ring.
@@ -356,10 +390,123 @@ export const FEEDBACK = Object.freeze({
     flash: () => [PALETTE.danger, 0.2],
   },
 
+  // #114 (Puffer): the swell is a rising telegraph whine; the burst is the mine's burst, bigger, with a shake.
+  puffSwell: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 1.8, volume: 0.4, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: PALETTE.bullet }),
+  },
+  puffBurst: {
+    sound: (ev) => ({ name: 'mineExplode', pitch: 1.4, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'mineExplode' }),
+    shake: () => 4,
+  },
+
+  // #114 (Shield Bearer): a barrier takes a dash, which is a clang; the Bearer's own hit is a lower clang.
+  bearerHit: {
+    sound: (ev) => ({ name: 'reflect', pitch: 0.6, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+    shake: () => 3,
+  },
+  barrierBreak: {
+    sound: (ev) => ({ name: 'reflect', pitch: 1.1, volume: 0.7, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+    floater: () => ({ text: 'BARRIER', color: '#9fb4c8', size: 18, life: 0.6 }),
+  },
+
+  // #114 (Ink Squid): the lob is a shot leaving the squid; its landing is a soft thud and an ink puff;
+  // a perfect reflection is the perfect-pulse shatter; a deflection and a puddle dispelled by a dash are clangs and a puff.
+  lobThrow: {
+    sound: (ev) => ({ name: 'enemyShoot', pitch: 0.6, volume: 0.5, pan: panFor(ev.x) }),
+  },
+  lobLand: {
+    sound: (ev) => ({ name: 'mineArm', pitch: 0.5, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: '#7a5cff' }),
+  },
+  lobReflect: {
+    sound: (ev) => ({ name: 'perfectPulse', pitch: 1.2, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'perfectShatter' }),
+    flash: () => ['#ffffff', 0.12],
+  },
+  lobDeflect: {
+    sound: (ev) => ({ name: 'reflect', pitch: 0.9, volume: 0.5, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+  },
+  puddleDispel: {
+    sound: (ev) => ({ name: 'dash', pitch: 0.7, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'whiffPuff' }),
+  },
+
+  // #114 (Phase Eel): the ripple warns, the surfacing and bite are a rip, going under is a soft puff.
+  eelRipple: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 0.6, volume: 0.5, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: '#5dd9ff' }),
+  },
+  eelSurface: {
+    sound: (ev) => ({ name: 'chargerLunge', pitch: 1.3, volume: 0.5, pan: panFor(ev.x) }),
+    shake: () => 2,
+  },
+  eelBite: {
+    sound: (ev) => ({ name: 'chargerLunge', pitch: 1.1, volume: 0.6, pan: panFor(ev.x) }),
+  },
+  eelHide: {
+    sound: (ev) => ({ name: 'uiClick', pitch: 0.5, volume: 0.3, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'whiffPuff' }),
+  },
+  eelStun: {
+    sound: (ev) => ({ name: 'reflect', pitch: 1.25, volume: 0.5, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'chargeGlint' }),
+  },
+
+  // #114: a lure of Drifters from the Warden, and the Warden's own beats. The intro is a sound and a
+  // screen flash: the boss's arrival. The telegraph is a low whine; the exposure is a bright tick, and a hit is
+  // a heavy thud. A phase change is a second flash.
+  lureSpawn: {
+    sound: (ev) => ({ name: 'enemyShoot', pitch: 1.6, volume: 0.4, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'spawnMotes', color: PALETTE.danger }),
+  },
+  bossIntro: {
+    sound: (ev) => ({ name: 'waveStart', pitch: 0.6, pan: panFor(ev.x) }),
+    shake: () => 10,
+    flash: () => [PALETTE.danger, 0.3],
+    floater: () => ({ text: 'WARDEN', color: PALETTE.danger, size: 28, life: 1.6 }),
+  },
+  bossTelegraph: {
+    sound: (ev) => ({ name: 'chargerTelegraph', pitch: 0.7, volume: 0.6, pan: panFor(ev.x) }),
+  },
+  bossExpose: {
+    sound: (ev) => ({ name: 'spawnWarn', pitch: 1.5, volume: 0.6, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'chargeGlint' }),
+  },
+  bossHit: {
+    sound: (ev) => ({ name: 'kill', pitch: 0.5, volume: 0.7, pan: panFor(ev.x) }),
+    preset: (ev) => ({ name: 'killLarge', color: PALETTE.danger }),
+    shake: () => 6,
+    hitstop: () => 50,
+  },
+  bossPhase: {
+    sound: (ev) => ({ name: 'waveStart', pitch: 1.2, pan: panFor(ev.x) }),
+    shake: () => 8,
+    flash: () => [PALETTE.danger, 0.25],
+    floater: () => ({ text: 'PHASE 2', color: PALETTE.danger, size: 22, life: 1.2 }),
+  },
+  bossStun: {
+    sound: (ev) => ({ name: 'perfectPulse', pitch: 0.7, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'perfectShatter' }),
+    hitstop: () => 40,
+    flash: () => ['#ffffff', 0.12],
+  },
+  bossDown: {
+    sound: (ev) => ({ name: 'comboTierUp', pitch: 0.8, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'comboTierBloom', color: PALETTE.gold }),
+    shake: () => 12,
+    hitstop: () => 60,
+    flash: () => ['#ffffff', 0.25],
+  },
+
   // The wave is cleared and the next one is about to start (#70): a rising chime, a gold bloom, a brief gold
   // flash and a WAVE CLEAR banner.
   waveClear: {
-    sound: () => ({ name: 'comboTierUp', pitch: 1.5 }),
+    sound: () => ({ name: 'waveClear' }),
     preset: () => ({ name: 'comboTierBloom', color: PALETTE.gold }),
     flash: () => [PALETTE.gold, 0.12],
     floater: () => ({ text: 'WAVE CLEAR', color: PALETTE.gold, size: 32, life: 1.2 }),
@@ -404,8 +551,8 @@ export function createFeedback({ audio, fx }) {
   let lastWarnAt = -Infinity; // sim time of the latest spawn marker, for burst grouping (#79)
   let runActive = false;
   let musicOn = false;
-  let musicLevel = 0;
-  let sentLevel = -1;
+  let sentLevel = -1; // last music intensity sent (0..1 in quarters)
+  let sentDanger = null; // last low-health flag sent
 
   // Adds the fields rows need: a position (the player for events without one), the batch count,
   // and the combo count, which comboTier rows show and which the sim does not put on the event.
@@ -438,7 +585,8 @@ export function createFeedback({ audio, fx }) {
   }
 
   function addFloater(f, ev) {
-    const spawn = () => fx.floater(ev.x, ev.y, f.text, { color: f.color, size: f.size, life: f.life });
+    const y = ev.y - (f.lift ?? 0);
+    const spawn = () => fx.floater(ev.x, y, f.text, { color: f.color, size: f.size, life: f.life });
     if (f.delay > 0) later.push({ at: clock + f.delay / 1000, run: spawn });
     else spawn();
   }
@@ -446,12 +594,16 @@ export function createFeedback({ audio, fx }) {
   function burstPreset(p, x, y) {
     const make = PRESET_BURSTS[p.name];
     if (!make) return;
-    for (const b of make(p)) fx.burst(x, y, b);
+    for (const b of make(p)) {
+      if (b.collapse) fx.collapse(x, y, b);
+      else fx.burst(x, y, b);
+    }
   }
 
   function startMusic() {
     if (!runActive || musicOn) return;
     musicOn = true;
+    audio.setMusicPaused(false); // a run never starts ducked, even if the last pause was not cleared
     audio.startMusic();
   }
 
@@ -461,13 +613,19 @@ export function createFeedback({ audio, fx }) {
     audio.stopMusic();
   }
 
+  function playSound(s) {
+    audio.play(s.name, { pitch: s.pitch ?? 1, volume: s.volume ?? 1, pan: s.pan ?? 0 });
+  }
+
   // Applies one table row to one event. `scope` is the dash batch for kill rows, null otherwise.
   function play(type, ev, scope) {
     const row = FEEDBACK[type];
     if (!row) return;
 
     const s = row.sound?.(ev);
-    if (s) audio.play(s.name, { pitch: s.pitch ?? 1, volume: s.volume ?? 1, pan: s.pan ?? 0 });
+    if (s) playSound(s);
+    const layer = row.soundLayer?.(ev);
+    if (layer) playSound(layer);
 
     const p = row.preset?.(ev);
     if (p) burstPreset(p, ev.x, ev.y);
@@ -564,7 +722,7 @@ export function createFeedback({ audio, fx }) {
     if (batch && (game.over || !d.active)) flushBatch();
   }
 
-  // Once per real frame. `dt` is 0 while paused, so delayed floaters, rings and music smoothing freeze too.
+  // Once per real frame. `dt` is 0 while paused, so delayed floaters and rings freeze too.
   function frame(dt, game) {
     clock += dt;
     for (let i = later.length - 1; i >= 0; i--) {
@@ -578,14 +736,19 @@ export function createFeedback({ audio, fx }) {
       if (rings[i].age >= rings[i].life) rings.splice(i, 1);
     }
 
-    // Music intensity follows the multiplier: 0 at x1, 1 at the cap, eased so layers never snap.
-    const live = game && runActive && !game.over;
-    const mult = live ? multiplierFor(game.combo.count) : 1;
-    const target = (mult - 1) / (COMBO.multiplierCap - 1);
-    musicLevel += (target - musicLevel) * (1 - Math.exp(-dt * 4));
-    if (Math.abs(musicLevel - sentLevel) > 0.002) {
-      sentLevel = musicLevel;
-      audio.setMusicIntensity(musicLevel);
+    const live = !!game && runActive && !game.over;
+    // Four music layers, one per combo tier (Q9, #108): intensity is tier / 4. The audio layer latches changes to
+    // the next bar line, so this is sent as the tier steps and never eased.
+    const level = live ? tierFor(game.combo.count) / COMBO.tiers.length : 0;
+    if (level !== sentLevel) {
+      sentLevel = level;
+      audio.setMusicIntensity(level);
+    }
+    // Low health: one hit point left (#108). Sent on change only.
+    const danger = live && game.player.hp <= 1;
+    if (danger !== sentDanger) {
+      sentDanger = danger;
+      audio.setMusicDanger(danger);
     }
   }
 
@@ -596,16 +759,16 @@ export function createFeedback({ audio, fx }) {
     // Start and restart both come through here, so the start sound covers both (#71).
     startRun() {
       runActive = true;
-      musicLevel = 0;
       sentLevel = -1;
+      sentDanger = null;
       play('uiStart', MENU_EV, null);
       startMusic();
     },
-    // Pause and resume both come through here (#71). The click is the menu's acknowledgement.
+    // Pause and resume both come through here (#71). The click is the menu's acknowledgement. Pause ducks the
+    // music and keeps its clock, and resume brings it back on the next bar (#108), so it is not a stop.
     setPaused(paused) {
       play('uiClick', MENU_EV, null);
-      if (paused) stopMusic();
-      else startMusic();
+      if (runActive) audio.setMusicPaused(paused);
     },
   };
 }
