@@ -24,14 +24,46 @@
       margin: 4px 0 8px;
     }
     code { color: #ffb347; }
+    #vision { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 12px; }
+    #vision button {
+      font: 600 13px system-ui, sans-serif;
+      color: #9fc3e6;
+      background: #0b1a33;
+      border: 1px solid #1d3a63;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    #vision button[aria-pressed="true"] { color: #050a18; background: #3cf2ff; border-color: #3cf2ff; }
+    .vision-off { filter: none; }
   </style>
 </head>
 <body>
-  <h1>Riptide Rush: art gallery</h1>
-  <p>Every sprite is procedural Canvas 2D (<code>src/art.js</code>). Rows are the three states each enemy must read in:
-     normal, hit flash, and telegraph. The 1x row is gameplay scale; the 3x row is for silhouette checks.</p>
+  <!-- Colour-vision filters, applied to the canvases by the toggle below. Machado et al. (2009) severity 1.0, applied in sRGB. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <filter id="vis-grey" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0"/>
+    </filter>
+    <filter id="vis-deut" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.367322 0.860646 -0.227968 0 0  0.280085 0.672501 0.047413 0 0  -0.011820 0.042940 0.968881 0 0  0 0 0 1 0"/>
+    </filter>
+    <filter id="vis-prot" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.152286 1.052583 -0.204868 0 0  0.114503 0.786281 0.099216 0 0  -0.003882 -0.048116 1.051998 0 0  0 0 0 1 0"/>
+    </filter>
+  </svg>
 
-  <canvas id="gallery" width="1280" height="1520" aria-label="Art gallery: background, player, enemies, bullets and pulse"></canvas>
+  <h1>Riptide Rush: art gallery</h1>
+  <p>Every sprite is procedural Canvas 2D (<code>src/art.js</code>). Rows are the states each enemy must read in:
+     normal, hit flash, and telegraph. The 1x row is gameplay scale; the 3x row is for silhouette checks (the warden is drawn at 0.8x so it fits its cell).</p>
+
+  <div id="vision" role="group" aria-label="Vision simulation for every canvas on this page">
+    <button type="button" data-vision="off" aria-pressed="true">Normal</button>
+    <button type="button" data-vision="grey" aria-pressed="false">Greyscale</button>
+    <button type="button" data-vision="deut" aria-pressed="false">Deuteranopia</button>
+    <button type="button" data-vision="prot" aria-pressed="false">Protanopia</button>
+  </div>
+
+  <canvas id="gallery" width="1960" height="1960" aria-label="Art gallery: background, player, enemies, hazards, the warden, bullets and pulse"></canvas>
 
   <h2>Stress: 200 mixed enemies</h2>
   <div id="readout">FPS --</div>
@@ -41,11 +73,29 @@
   import { PALETTE, draw } from '../src/art.js';
 
   const TAU = Math.PI * 2;
-  const TYPES = ['drifter', 'spitter', 'charger', 'shellback', 'splitter', 'mini', 'mine'];
+  const TYPES = [
+    'drifter', 'spitter', 'charger', 'shellback', 'splitter', 'mini', 'mine',
+    'puffer', 'shieldbearer', 'inksquid', 'phaseeel', 'warden',
+  ];
+  // The 3x row uses 0.8x for the warden, so its tail and lure stay inside the 146 px cell.
+  const SILHOUETTE_SCALE = (type) => (type === 'warden' ? 0.8 : 3);
+
+  // ---- vision toggle ---------------------------------------------------------------
+  const VISION = { off: 'none', grey: 'url(#vis-grey)', deut: 'url(#vis-deut)', prot: 'url(#vis-prot)' };
+  const canvases = [document.getElementById('gallery'), document.getElementById('stress')];
+  for (const btn of document.querySelectorAll('#vision button')) {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.vision;
+      for (const b of document.querySelectorAll('#vision button')) {
+        b.setAttribute('aria-pressed', String(b === btn));
+      }
+      for (const c of canvases) c.style.filter = VISION[mode];
+    });
+  }
 
   // ---- gallery canvas -------------------------------------------------------
-  const GW = 1280;
-  const GH = 1520;
+  const GW = 1960;
+  const GH = 1960;
   const gal = document.getElementById('gallery');
   const g = gal.getContext('2d');
 
@@ -114,27 +164,28 @@
       });
     });
 
-    // 3. Enemies at 1x and 3x
+    // 3. Enemies at 1x and 3x. Twelve types across, in the order of TYPES.
     label(g, 'ENEMIES at gameplay scale (1x, roughly 28 px)', 4, 406, '#ff9a4a');
     TYPES.forEach((type, i) => labelCentre(g, type, 150 + i * 150 + 73, 424, '#dbe9ff'));
     VARIANTS.forEach(([name, opts], row) => {
       const y = 432 + row * 86;
       label(g, name, 6, y + 46, '#8fb4d9');
       TYPES.forEach((type, i) => {
+        // The warden is 4x a standard enemy, so its 1x cell (84 px high) would clip it. It is drawn at 0.7x here.
         cell(150 + i * 150, y, 146, 84, t, (c, w, h) => {
-          draw.enemy(c, type, w / 2, h / 2, 0.35, t, opts);
+          draw.enemy(c, type, w / 2, h / 2, 0.35, t, type === 'warden' ? { ...opts, scale: 0.7 } : opts);
         });
       });
     });
 
-    label(g, 'ENEMIES at 3x (silhouette check)', 4, 716, '#ff9a4a');
+    label(g, 'ENEMIES at 3x (silhouette check; warden at 0.8x)', 4, 716, '#ff9a4a');
     TYPES.forEach((type, i) => labelCentre(g, type, 150 + i * 150 + 73, 734, '#dbe9ff'));
     VARIANTS.forEach(([name, opts], row) => {
       const y = 742 + row * 150;
       label(g, name, 6, y + 80, '#8fb4d9');
       TYPES.forEach((type, i) => {
         cell(150 + i * 150, y, 146, 146, t, (c, w, h) => {
-          draw.enemy(c, type, w / 2, h / 2, 0.35, t, { ...opts, scale: 3 });
+          draw.enemy(c, type, w / 2, h / 2, 0.35, t, { ...opts, scale: SILHOUETTE_SCALE(type) });
         });
       });
     });
@@ -178,7 +229,47 @@
         label(c, name, 6, h - 8, '#8fb4d9', 11);
       });
     });
-    g.restore();
+
+    // 6. Hazards and the new enemy states (#19, #20, #22, #24).
+    label(g, 'HAZARDS and STATES: ink puddle, lob shadow, lob, barrier, aura, phase eel', 4, 1542, '#c79bff');
+    const hazards = [
+      ['ink puddle (life 1)', (c, w, h, tt) => draw.hazard(c, 'puddle', w / 2, h / 2, 46, tt, { life: 1 })],
+      ['puddle fading (life 0.3)', (c, w, h, tt) => draw.hazard(c, 'puddle', w / 2, h / 2, 46, tt, { life: 0.3 })],
+      ['lob shadow, 0.3 of flight', (c, w, h, tt) => draw.hazard(c, 'shadow', w / 2, h / 2, 50, tt, { progress: 0.3 })],
+      ['lob landing (0.95)', (c, w, h, tt) => draw.hazard(c, 'shadow', w / 2, h / 2, 50, tt, { progress: 0.95 })],
+      ['lob in flight over its shadow', (c, w, h, tt) => {
+        draw.hazard(c, 'shadow', w / 2, h / 2 + 22, 50, tt, { progress: 0.5 });
+        draw.hazard(c, 'lob', w / 2, h / 2 - 8, 9, tt, { height: 1 });
+      }],
+      ['barrier on a drifter', (c, w, h, tt) => draw.enemy(c, 'drifter', w / 2, h / 2, 0.4, tt, { scale: 1.6, barrier: 1 })],
+      ['shield bearer aura (120)', (c, w, h, tt) => draw.enemy(c, 'shieldbearer', w / 2, h / 2, 0, tt, { scale: 0.6, aura: 120 })],
+      ['phase eel: hidden', (c, w, h, tt) => draw.enemy(c, 'phaseeel', w / 2, h / 2, 0.2, tt, { scale: 2.2, visibility: 0 })],
+      ['phase eel: surfacing ripple', (c, w, h, tt) => draw.enemy(c, 'phaseeel', w / 2, h / 2, 0.2, tt, { scale: 2.2, visibility: 0, telegraph: 0.9 })],
+      ['phase eel: visible', (c, w, h, tt) => draw.enemy(c, 'phaseeel', w / 2, h / 2, 0.2, tt, { scale: 2.2, visibility: 1 })],
+    ];
+    hazards.forEach(([name, paint], i) => {
+      cell(4 + i * 196, 1552, 190, 150, t, (c, w, h) => {
+        paint(c, w, h, t);
+        label(c, name, 6, h - 8, '#8fb4d9', 11);
+      });
+    });
+
+    // 7. The warden: phase 1 and phase 2, with the weak point dim and glowing, plus its telegraph and flash.
+    label(g, 'ANGLERFISH WARDEN (boss, 4x enemy size, shown at 0.9x): phase 1 and phase 2, weak point dim and glowing', 4, 1736, '#ff5a2a');
+    const wardens = [
+      ['phase 1, weak point dim', { phase: 1, vulnerable: 0 }],
+      ['phase 1, weak point glowing', { phase: 1, vulnerable: 1 }],
+      ['phase 2, weak point dim', { phase: 2, vulnerable: 0 }],
+      ['phase 2, weak point glowing', { phase: 2, vulnerable: 1 }],
+      ['phase 2, telegraph', { phase: 2, telegraph: 0.85 }],
+      ['phase 2, hit flash', { phase: 2, flash: 1 }],
+    ];
+    wardens.forEach(([name, opts], i) => {
+      cell(4 + i * 324, 1746, 316, 200, t, (c, w, h) => {
+        draw.enemy(c, 'warden', w / 2, h / 2 + 4, 0.2, t, { ...opts, scale: 0.9 });
+        label(c, name, 6, h - 8, '#8fb4d9', 11);
+      });
+    });
   }
 
   // ---- stress view ----------------------------------------------------------
