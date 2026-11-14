@@ -63,6 +63,16 @@ export function aggregatePolicy(runs) {
   let died = 0;
   const apm = [];
   const waves = {};
+  // Healing and crowd (#105).
+  const healSources = {};
+  const healWaits = [];
+  const healsPerRun = [];
+  const healsPerMinuteRun = [];
+  let heals = 0;
+  let belowSeconds = 0;
+  let aliveSum = 0;
+  let aliveSteps = 0;
+  const aliveMeans = [];
 
   for (const r of runs) {
     dashes += r.dashes;
@@ -78,6 +88,17 @@ export function aggregatePolicy(runs) {
     if (r.survivedToCap) survivedToCap += 1;
     if (r.died) died += 1;
     if (r.time > 0) apm.push(((r.dashes + r.pulses) * 60) / r.time);
+    heals += r.heals.length;
+    healsPerRun.push(r.heals.length);
+    if (r.time > 0) healsPerMinuteRun.push((r.heals.length * 60) / r.time);
+    for (const h of r.heals) {
+      add(healSources, h.source);
+      healWaits.push(h.wait);
+    }
+    belowSeconds += r.belowSeconds;
+    aliveSum += r.aliveSum;
+    aliveSteps += r.aliveSteps;
+    if (r.aliveSteps > 0) aliveMeans.push(r.aliveSum / r.aliveSteps);
     for (const [k, n] of Object.entries(r.killsByCause)) add(killsByCause, k, n);
     for (const [k, n] of Object.entries(r.killsByType)) add(killsByType, k, n);
     for (const [k, n] of Object.entries(r.killsByTypeCause)) add(killsByTypeCause, k, n);
@@ -174,6 +195,15 @@ export function aggregatePolicy(runs) {
     waveRows,
     violations,
     observations,
+    heals,
+    healsPerRun: summarize(healsPerRun),
+    healsPerMinuteRun: summarize(healsPerMinuteRun),
+    healsPerMinutePooled: totalSeconds > 0 ? (heals * 60) / totalSeconds : NaN,
+    healSources,
+    healWait: summarize(healWaits),
+    belowShare: share(belowSeconds, totalSeconds),
+    aliveTension: aliveSteps > 0 ? aliveSum / aliveSteps : NaN,
+    aliveTensionPerRun: summarize(aliveMeans),
   };
 }
 
@@ -209,6 +239,11 @@ export function renderPolicy(name, a) {
   out.push(`| Dashes that killed at least once | ${pct(a.dashesWithKillShare)} |`);
   out.push(`| Perfect pulses / deflected dashes (total) | ${a.perfectPulses} / ${a.deflects} |`);
   out.push(`| Time with no enemy within 250 px / with no enemy and full charges | ${pct(a.noEnemyNearShare)} / ${pct(a.idleFullShare)} |`);
+  out.push(`| Enemies alive, average over tension waves (wave 3 on): pooled / per-run median | ${f(a.aliveTension)} / ${f(a.aliveTensionPerRun.p50)} |`);
+  out.push(`| Heals per run / per minute of run (pooled) | ${f(a.healsPerRun.mean, 2)} / ${f(a.healsPerMinutePooled, 2)} |`);
+  out.push(`| Time spent below full health (share of run time) | ${pct(a.belowShare)} |`);
+  out.push(`| Time below full health before a heal, s | ${dist(a.healWait)} |`);
+  out.push(`| Heal sources | ${Object.entries(a.healSources).map(([k, n]) => `${k} ${n}`).join(', ') || 'none'} |`);
   out.push('');
   out.push(`Hit points lost in total: ${a.hits}. In the same step a dash ended: ${a.hitsSameStep} (${pct(share(a.hitsSameStep, a.hits))}). Within 0.5 s of a deflected dash: ${a.hitsAfterDeflect} (${pct(share(a.hitsAfterDeflect, a.hits))}).`);
   out.push('');
@@ -267,7 +302,7 @@ export function renderPolicy(name, a) {
   return out.join('\n');
 }
 
-// The balance targets from the balance pass brief (#97), checked against a full run. Each row names the
+// The balance targets from the balance pass 2 brief (#105), checked against a full run. Each row names the
 // measured value, the target and whether it holds. Thresholds are the brief's; nothing is tuned to them here.
 export function targetRows(perPolicy) {
   const rows = [];
@@ -275,24 +310,27 @@ export function targetRows(perPolicy) {
   const b = perPolicy.beginner;
   if (b) {
     const p50 = b.survival.p50;
-    add('beginner', 'median survival, s', p50, '75-120', p50 >= 75 && p50 <= 120);
+    add('beginner', 'median survival, s', p50, '70-120', p50 >= 70 && p50 <= 120);
     // Only waves that at least 30 runs reach: a wave one run reaches tells nothing about the wall.
     const worstWave = Math.max(0, ...b.waveRows.filter((w) => w.reached >= 30).map((w) => w.deathRate));
-    add('beginner', 'worst wave death rate (waves reached by 30+ runs)', worstWave, '<= 40%', worstWave <= 0.4);
+    add('beginner', 'worst wave death rate (waves reached by 30+ runs)', worstWave, '<= 45%', worstWave <= 0.45);
     const worstType = Math.max(0, ...Object.values(b.hitsByType).map((n) => (b.hits > 0 ? n / b.hits : 0)));
-    add('beginner', 'largest single-type share of HP lost', worstType, '<= 60%', worstType <= 0.6);
+    add('beginner', 'largest single-type share of HP lost (not a brief target; 003 row)', worstType, '<= 60%', worstType <= 0.6);
   }
   const i = perPolicy.intermediate;
   if (i) {
     const p50 = i.survival.p50;
-    add('intermediate', 'median survival, s', p50, '150-270', p50 >= 150 && p50 <= 270);
+    add('intermediate', 'median survival, s', p50, '120-240', p50 >= 120 && p50 <= 240);
     add('intermediate', 'share reaching the 300 s cap', i.survivedToCapShare, '< 15%', i.survivedToCapShare < 0.15);
+    add('intermediate', 'median time below full health before a heal, s', i.healWait.p50, '< 45', i.healWait.p50 < 45);
   }
   const e = perPolicy.expert;
   if (e) {
-    add('expert', 'median survival, s', e.survival.p50, '>= 240', e.survival.p50 >= 240);
-    add('expert', 'median APM (dashes + pulses / min)', e.apm.p50, '>= 110', e.apm.p50 >= 110);
-    add('expert', 'average dash kills per dash', e.dashKillsPerDash, '>= 1.8', e.dashKillsPerDash >= 1.8);
+    add('expert', 'median actions per minute (dashes + pulses)', e.apm.p50, '>= 110', e.apm.p50 >= 110);
+    add('expert', 'average dash kills per dash', e.dashKillsPerDash, '>= 2', e.dashKillsPerDash >= 2);
+    add('expert', 'median survival, s', e.survival.p50, '>= 200', e.survival.p50 >= 200);
+    add('expert', 'average enemies alive in tension waves', e.aliveTension, '25-45', e.aliveTension >= 25 && e.aliveTension <= 45);
+    add('expert', 'median time below full health before a heal, s', e.healWait.p50, '< 45', e.healWait.p50 < 45);
   }
   for (const [name, a] of Object.entries(perPolicy)) {
     const violated = Object.keys(a.violations).length;

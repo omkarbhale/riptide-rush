@@ -29,7 +29,7 @@ import {
   comboDrainScale,
   healPlayer, // #114: the Warden's guaranteed heal
 } from './pickups.js';
-import { planWave, formationOffsets, FORMATIONS } from './waves.js';
+import { planWave, formationOffsets, FORMATIONS, spitterCapFor, chargerCapFor, crowdTargetFor } from './waves.js';
 // #114: Puffer, Shield Bearer, Ink Squid, Phase Eel and the Warden. Behaviour and data live in enemies-extra.js.
 import {
   EXTRA_KINDS,
@@ -561,8 +561,9 @@ export function update(game, input, dt) {
   enemiesTouchPlayer(game);
   reflectedBulletsHitEnemies(game);
 
-  game.enemies = game.enemies.filter((e) => e.alive);
-  game.bullets = game.bullets.filter((b) => b.alive);
+  // Filter only when something died (#105 perf): the same arrays otherwise, so no per-step copies.
+  if (game.enemies.some((e) => !e.alive)) game.enemies = game.enemies.filter((e) => e.alive);
+  if (game.bullets.some((b) => !b.alive)) game.bullets = game.bullets.filter((b) => b.alive);
 }
 
 // ---- Combo, score and dash charges ----------------------------------------------------------
@@ -618,7 +619,8 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
   c.timer = comboWindowFor(c.count);
   const mult = multiplierFor(c.count);
   const bonus = slashIndex > 1 ? COMBO.multiBonus * mult : 0;
-  const points = def.points * mult + bonus + (e.killBonus ?? 0); // killBonus: #114 lure Drifters
+  const lure = e.killBonus ?? 0; // #114: a lure Drifter's extra points
+  const points = def.points * mult + bonus + lure;
   game.score += points;
   game.kills += 1;
   const d = game.player.dash;
@@ -633,6 +635,7 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
     multi: slashIndex,
     bonus,
     points,
+    lure,
     hitStopMs: hitStopFor(slashIndex),
     cause,
   });
@@ -1182,9 +1185,16 @@ function beginWave(game, number) {
   w.total = total;
   w.release = plan.release;
   w.boss = plan.boss; // #114: the boss this wave holds for, or null
-  game.liveWaves.push({ number, total, release: plan.release });
+  game.liveWaves.push({ number, total, release: plan.release, hurtsAt: game.pickups.hurts });
   game.nextSpawnAt = Math.max(game.nextSpawnAt, game.time + SPAWN.groupLeadIn);
   game.events.push({ type: 'waveStart', wave: number });
+}
+
+// Schools of wave n still waiting to be released.
+function queuedOf(game, n) {
+  let r = 0;
+  for (const q of game.spawnQueue) if (q.wave === n) r += 1;
+  return r;
 }
 
 // Enemies, warnings and queued schools that still belong to wave n. A wave is cleared when this is zero.
@@ -1197,9 +1207,10 @@ function remainingOf(game, n) {
 }
 
 // The wave state machine (#83, #97). Schools are released one at a time, as warnings, once their gap has
-// passed, the entity cap has room and (for the first Spitter) the gate is open. Then:
-//  - A non-release wave hands over to the next wave once it is down to SPAWN.stragglers of its count, or
-//    after SPAWN.waveTimeLimit, so waves overlap. The old wave's stragglers keep fighting.
+// passed, the entity cap has room, the crowd director and the Spitter/Charger caps allow, and (for the first
+// Spitter) the gate is open. Then:
+//  - A non-release wave hands over to the next wave once every one of its schools is released (#105), or
+//    after SPAWN.waveTimeLimit, so waves overlap. The old wave's schools keep arriving with the new ones.
 //  - A release wave runs to a clear, then a SPAWN.breather, and the next wave starts after it.
 // A wave clears when none of its enemies, warnings or queued schools remain.
 function updateSpawner(game, dt) {
@@ -1222,16 +1233,20 @@ function updateSpawner(game, dt) {
     if (w.release) {
       if (age >= SPAWN.releaseTimeLimit) beginWave(game, w.number + 1); // the breather is kept when it clears
     } else {
-      const threshold = Math.max(1, Math.ceil(SPAWN.stragglers * w.total));
+      // #105: hand over once every school of this wave has been released, so the next wave's warnings show
+      // while this wave's schools are still alive. The time limit is the backstop.
       // #114: a boss wave ends when its boss dies, so it never hands over early.
-      if (!w.boss && (remainingOf(game, w.number) <= threshold || age >= SPAWN.waveTimeLimit)) beginWave(game, w.number + 1);
+      // A boss wave holds for its boss, but no longer than SPAWN.bossHoldLimit (#105: no stalled wave).
+      const holding = Boolean(w.boss) && age < SPAWN.bossHoldLimit;
+      if (!holding && (queuedOf(game, w.number) === 0 || age >= SPAWN.waveTimeLimit)) beginWave(game, w.number + 1);
     }
   }
 
-  for (const rec of [...game.liveWaves]) {
+  for (const rec of game.liveWaves) { // replaced below, never mutated, so this walks the list as it was
     if (remainingOf(game, rec.number) > 0) continue;
     game.liveWaves = game.liveWaves.filter((r) => r !== rec);
     game.events.push({ type: 'waveClear', wave: rec.number });
+    onWaveEnd(game, rec); // PICKUPS: a flawless release wave heals (#105)
     if (rec.number === w.number && w.phase === 'active') {
       if (rec.release) {
         w.phase = 'breather';
@@ -1247,10 +1262,11 @@ function updateSpawner(game, dt) {
 }
 
 // Releases the first queued school that may come now: due by its gap, with room under the entity cap.
-// The first Spitter of the run waits until no Drifter is alive, warning or queued (#84).
+// The gates read the field once per call (gateCounts), so a blocked queue costs one pass, not one per entry.
 function releaseSchool(game) {
   if (game.spawnQueue.length === 0 || game.time < game.nextSpawnAt) return;
-  const idx = game.spawnQueue.findIndex((entry) => spawnAllowed(game, entry));
+  const gate = gateCounts(game);
+  const idx = game.spawnQueue.findIndex((entry) => spawnAllowed(game, entry, gate));
   if (idx < 0) return;
   const entry = game.spawnQueue[idx];
   if (entityCount(game) + entry.size > SPAWN.maxEntities) return; // the wave script waits for room
@@ -1262,19 +1278,50 @@ function releaseSchool(game) {
   game.nextSpawnAt = game.time + entry.gap;
 }
 
+// Live counts the release gates read: alive and warned Drifters, Spitters and Chargers, and whether any
+// Drifter school is still queued. One pass over the field per release decision.
+function gateCounts(game) {
+  const g = {
+    alive: { drifter: 0, spitter: 0, charger: 0 },
+    warned: { drifter: 0, spitter: 0, charger: 0 },
+    drifterQueued: false,
+  };
+  for (const e of game.enemies) if (e.alive && e.kind in g.alive) g.alive[e.kind] += 1;
+  for (const wn of game.warnings) if (wn.kind in g.warned) g.warned[wn.kind] += 1;
+  for (const q of game.spawnQueue) {
+    if (q.kind === 'drifter') {
+      g.drifterQueued = true;
+      break;
+    }
+  }
+  return g;
+}
+
+// Simultaneous caps (#105): a Spitter or Charger school waits while the live (alive or warned) count of its
+// kind is at its cap for the wave it belongs to. Drifters are never capped: they carry the crowd.
+function kindCapped(entry, g) {
+  const cap = entry.kind === 'spitter' ? spitterCapFor(entry.wave) : entry.kind === 'charger' ? chargerCapFor(entry.wave) : Infinity;
+  if (cap === Infinity) return false;
+  return g.alive[entry.kind] + g.warned[entry.kind] + entry.size > cap;
+}
+
+// Crowd director (#105): a Drifter school waits while the live Drifters (on the field, not counting warnings,
+// so the next schools can show their warnings ahead of the crowd) plus this one would pass the crowd target.
+function crowdFull(entry, g) {
+  if (entry.kind !== 'drifter') return false;
+  return g.alive.drifter + entry.size > crowdTargetFor(entry.wave);
+}
+
 // The first Spitter waits for the Drifter schools to be cleared: none queued or warned, and no more than
 // SPAWN.spitterGateDrifters left alive. It never waits past SPAWN.spitterGateTime, so a player who
 // ignores Drifters still meets Spitters (#84, and no stall).
-function spawnAllowed(game, entry) {
+function spawnAllowed(game, entry, g) {
+  if (kindCapped(entry, g) || crowdFull(entry, g)) return false;
   if (entry.kind !== 'spitter' || game.spitterReleased) return true;
   if (game.time < SPAWN.drifterOnlyUntil) return true;
   if (game.spitterWaitFrom < 0) game.spitterWaitFrom = game.time;
   if (game.time - game.spitterWaitFrom >= SPAWN.spitterGateTime) return true;
-  const drifterQueued = game.spawnQueue.some((q) => q.kind === 'drifter');
-  const drifterWarned = game.warnings.some((wn) => wn.kind === 'drifter');
-  let drifterAlive = 0;
-  for (const e of game.enemies) if (e.alive && e.kind === 'drifter') drifterAlive += 1;
-  return !drifterQueued && !drifterWarned && drifterAlive <= SPAWN.spitterGateDrifters;
+  return !g.drifterQueued && g.warned.drifter === 0 && g.alive.drifter <= SPAWN.spitterGateDrifters;
 }
 
 // Puts a school on the field as warnings. A Drifter school gets a formation (line, wedge or ring) that
@@ -1328,24 +1375,33 @@ function updateSchools(game, dt) {
 
 // Drops schools with no enemy or warning left, so the list stays short.
 function pruneSchools(game) {
-  if (game.schools.length === 0) return;
-  const live = new Set();
-  for (const e of game.enemies) if (e.alive && e.school) live.add(e.school.id);
-  for (const wn of game.warnings) if (wn.slot) live.add(wn.slot.school.id);
-  game.schools = game.schools.filter((s) => live.has(s.id));
+  if (game.schools.length === 0 || game.step % 8 !== 0) return; // a school with no members never gets another (#105 perf)
+  const live = {};
+  for (const e of game.enemies) if (e.alive && e.school) live[e.school.id] = true;
+  for (const wn of game.warnings) if (wn.slot) live[wn.slot.school.id] = true;
+  game.schools = game.schools.filter((s) => live[s.id] === true);
 }
 
 // A lone enemy (the last of its wave, with nothing else of that wave pending) turns aggressive after
 // AGGRO.loneTime. Mines are exempt: an idle mine arms itself instead (#83).
+// Counts are kept per live wave: an enemy only exists while its wave is live (a wave clears when none of
+// its enemies, warnings or schools remain), so the live waves cover every enemy. Mines and aggressive ones
+// count toward their wave, as before.
 function updateLoneEnemies(game, dt) {
-  const alive = new Map();
-  for (const e of game.enemies) if (e.alive) alive.set(e.wave, (alive.get(e.wave) ?? 0) + 1);
-  const pending = new Set();
-  for (const q of game.spawnQueue) pending.add(q.wave);
-  for (const wn of game.warnings) pending.add(wn.wave);
+  const ws = game.liveWaves;
+  const count = new Array(ws.length).fill(0);
+  const pending = new Array(ws.length).fill(false);
+  const at = (wave) => {
+    for (let i = 0; i < ws.length; i++) if (ws[i].number === wave) return i;
+    return -1;
+  };
+  for (const e of game.enemies) if (e.alive) { const i = at(e.wave); if (i >= 0) count[i] += 1; }
+  for (const q of game.spawnQueue) { const i = at(q.wave); if (i >= 0) pending[i] = true; }
+  for (const wn of game.warnings) { const i = at(wn.wave); if (i >= 0) pending[i] = true; }
   for (const e of game.enemies) {
     if (!e.alive || e.kind === 'mine' || e.aggro) continue;
-    const lone = alive.get(e.wave) === 1 && !pending.has(e.wave);
+    const i = at(e.wave);
+    const lone = i >= 0 && count[i] === 1 && !pending[i];
     e.loneT = lone ? e.loneT + dt : 0;
     if (e.loneT >= AGGRO.loneTime) {
       e.aggro = true;
@@ -1356,13 +1412,14 @@ function updateLoneEnemies(game, dt) {
 }
 
 // A spawn point (a school's anchor) on the arena edge, at least minDistFromPlayer from Rip
-// (12 tries, then the last one).
+// (24 tries, then the last one). Far spawns keep schools out of the dash's reach until they have crossed
+// the arena, so a crowd builds up instead of dying on arrival (#105).
 function spawnPoint(game) {
   const p = game.player;
   const inset = SCHOOL_INSET;
   let x = inset;
   let y = inset;
-  for (let attempt = 0; attempt < 12; attempt++) {
+  for (let attempt = 0; attempt < 24; attempt++) {
     const side = Math.floor(game.rng() * 4);
     const u = game.rng();
     if (side === 0) {

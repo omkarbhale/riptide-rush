@@ -46,6 +46,16 @@ export const EVENT_FIELDS = {
   chargerTelegraph: ['x', 'y'],
   chargerLunge: ['x', 'y'],
   hint: ['x', 'y', 'text'],
+  // Added with the crowd and the boss (#105, #114): the Warden's intro.
+  bossIntro: ['x', 'y', 'phase', 'hp', 'maxHp'],
+  // The rest of the #114 roster (Puffer, Shield Bearer, Ink Squid, Phase Eel, Warden): each carries x and y.
+  barrierBreak: ['x', 'y'], bearerHit: ['x', 'y', 'hp', 'maxHp'], bossDown: ['x', 'y', 'phase'],
+  bossExpose: ['x', 'y', 'duration'], bossHit: ['x', 'y', 'hp', 'maxHp', 'phase'], bossPhase: ['x', 'y', 'phase'],
+  bossStun: ['x', 'y', 'duration'], bossTelegraph: ['x', 'y', 'duration', 'phase'], eelBite: ['x', 'y', 'tx', 'ty', 'speed'],
+  eelHide: ['x', 'y'], eelRipple: ['x', 'y', 'duration'], eelStun: ['x', 'y', 'duration'], eelSurface: ['x', 'y', 'duration'],
+  lobDeflect: ['x', 'y', 'cause'], lobLand: ['x', 'y', 'duration', 'radius'], lobReflect: ['x', 'y'],
+  lobThrow: ['x', 'y', 'flightTime'], lureSpawn: ['x', 'y'], puddleDispel: ['x', 'y', 'radius'],
+  puffBurst: ['x', 'y', 'count', 'range'], puffSwell: ['x', 'y', 'duration'],
 };
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -244,7 +254,8 @@ export function createChecker(game) {
       const mult = multiplierFor(running);
       const bonus = k.multi > 1 ? COMBO.multiBonus * mult : 0;
       if (k.combo !== running) flag('KILL_COMBO_FIELD', t, `${k.enemyType} says combo ${k.combo}, expected ${running}`);
-      if (k.points !== def.points * mult + bonus || k.bonus !== bonus) {
+      // A lure Drifter's extra points (#114) ride on its kill event as `lure`.
+      if (k.points !== def.points * mult + bonus + (k.lure ?? 0) || k.bonus !== bonus) {
         flag('KILL_POINTS_MISMATCH', t, `${k.enemyType} x${mult} multi ${k.multi}: points ${k.points} bonus ${k.bonus}`);
       }
       killScore += k.points;

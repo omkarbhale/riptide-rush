@@ -36,25 +36,25 @@ export const LAST_TABLE_WAVE = 20;
 // Counts are the number of enemies of each kind.
 export const WAVE_TABLE = [
   { wave: 1, intensity: 1, release: false, cadence: 0.70, counts: { drifter: 16 } },
-  { wave: 2, intensity: 2, release: false, cadence: 0.65, counts: { drifter: 20, spitter: 1 } },
-  { wave: 3, intensity: 2, release: true, cadence: 0.60, counts: { drifter: 20 } },
-  { wave: 4, intensity: 4, release: false, cadence: 0.65, counts: { drifter: 20, spitter: 2, charger: 1 } },
-  { wave: 5, intensity: 3, release: true, cadence: 0.65, counts: { drifter: 20, splitter: 2 } },
-  { wave: 6, intensity: 5, release: false, cadence: 0.60, counts: { drifter: 24, charger: 2 } },
-  { wave: 7, intensity: 4, release: false, cadence: 0.60, counts: { drifter: 28, mine: 3 } },
-  { wave: 8, intensity: 6, release: false, cadence: 0.60, counts: { drifter: 24, spitter: 2, shellback: 2 } },
-  { wave: 9, intensity: 5, release: true, cadence: 0.50, counts: { drifter: 32 } },
-  { wave: 10, intensity: 8, release: false, cadence: 0.60, counts: { drifter: 24, splitter: 2, shellback: 2, warden: 1 } },
-  { wave: 11, intensity: 3, release: true, cadence: 0.55, counts: { drifter: 24, spitter: 2, charger: 2 } },
-  { wave: 12, intensity: 6, release: false, cadence: 0.50, counts: { drifter: 20, shellback: 1, puffer: 2 } },
-  { wave: 13, intensity: 6, release: false, cadence: 0.60, counts: { drifter: 16, shellback: 2, spitter: 1, shieldbearer: 1 } },
-  { wave: 14, intensity: 7, release: false, cadence: 0.55, counts: { drifter: 8, charger: 4, inksquid: 1 } }, // #88: was two chargers
-  { wave: 15, intensity: 4, release: true, cadence: 0.50, counts: { drifter: 28, shellback: 2 } },
-  { wave: 16, intensity: 7, release: false, cadence: 0.60, counts: { splitter: 2, mine: 4, spitter: 1, phaseeel: 1 } },
-  { wave: 17, intensity: 8, release: false, cadence: 0.55, counts: { drifter: 8, charger: 4, shellback: 4 } },
-  { wave: 18, intensity: 5, release: true, cadence: 0.50, counts: { drifter: 28, spitter: 3, shellback: 2 } },
-  { wave: 19, intensity: 9, release: false, cadence: 0.60, counts: { charger: 4, splitter: 3, spitter: 3, mine: 4 } },
-  { wave: 20, intensity: 10, release: false, cadence: 0.55, counts: { drifter: 20, spitter: 3, charger: 3, shellback: 4, warden: 1 } },
+  { wave: 2, intensity: 2, release: false, cadence: 0.20, counts: { drifter: 24, spitter: 1 } },
+  { wave: 3, intensity: 2, release: true, cadence: 0.20, counts: { drifter: 150 } },
+  { wave: 4, intensity: 4, release: false, cadence: 0.20, counts: { drifter: 180, spitter: 2, charger: 1 } },
+  { wave: 5, intensity: 3, release: true, cadence: 0.20, counts: { drifter: 180, splitter: 2 } },
+  { wave: 6, intensity: 5, release: false, cadence: 0.20, counts: { drifter: 210, charger: 2 } },
+  { wave: 7, intensity: 4, release: false, cadence: 0.20, counts: { drifter: 210, mine: 3 } },
+  { wave: 8, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 210, spitter: 2, shellback: 2 } },
+  { wave: 9, intensity: 5, release: true, cadence: 0.20, counts: { drifter: 240 } },
+  { wave: 10, intensity: 8, release: false, cadence: 0.20, counts: { drifter: 210, splitter: 2, shellback: 2 , warden: 1} },
+  { wave: 11, intensity: 3, release: true, cadence: 0.20, counts: { drifter: 210, spitter: 2, charger: 2 } },
+  { wave: 12, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 210, shellback: 1 , puffer: 2} },
+  { wave: 13, intensity: 6, release: false, cadence: 0.20, counts: { drifter: 180, shellback: 2, spitter: 1 , shieldbearer: 1} },
+  { wave: 14, intensity: 7, release: false, cadence: 0.20, counts: { drifter: 180, charger: 4 , inksquid: 1} }, // #88: was two chargers
+  { wave: 15, intensity: 4, release: true, cadence: 0.20, counts: { drifter: 240, shellback: 2 } },
+  { wave: 16, intensity: 7, release: false, cadence: 0.20, counts: { drifter: 150, splitter: 2, mine: 4, spitter: 1 , phaseeel: 1} },
+  { wave: 17, intensity: 8, release: false, cadence: 0.20, counts: { drifter: 180, charger: 4, shellback: 4 } },
+  { wave: 18, intensity: 5, release: true, cadence: 0.20, counts: { drifter: 240, spitter: 3, shellback: 2 } },
+  { wave: 19, intensity: 9, release: false, cadence: 0.20, counts: { drifter: 150, charger: 4, splitter: 3, spitter: 3, mine: 4 } },
+  { wave: 20, intensity: 10, release: false, cadence: 0.20, counts: { drifter: 210, spitter: 3, charger: 3, shellback: 4 , warden: 1} },
 ];
 
 // Point cost per enemy, from Part 3.2.
@@ -75,12 +75,13 @@ export const POINT_COSTS = {
 };
 
 // How a wave beyond 20 splits its point budget between kinds. Leftover points go to drifters.
-const BEYOND_SHARES = { drifter: 0.2, spitter: 0.2, charger: 0.2, mine: 0.05, splitter: 0.1, shellback: 0.25 };
+const BEYOND_SHARES = { drifter: 0.6, spitter: 0.12, charger: 0.08, mine: 0.02, splitter: 0.06, shellback: 0.12 };
 
 const RELEASE_BUDGET_SHARE = 0.6;
+const CADENCE_BEYOND = 0.20;
 // Budget growth past wave 20. It has no cap, so the wave keeps scaling (#97); the entity cap still holds.
-const BUDGET_BASE = 60;
-const BUDGET_PER_WAVE = 9;
+const BUDGET_BASE = 120;
+const BUDGET_PER_WAVE = 12;
 
 export const FORMATIONS = Object.freeze(['line', 'wedge', 'ring']);
 
@@ -101,11 +102,11 @@ export function budgetFor(wave) {
   return BUDGET_BASE + BUDGET_PER_WAVE * k;
 }
 
-// Seconds between school releases. Beyond 20: max(0.5, 0.6 - 0.01k).
+// Seconds between school releases. Beyond 20 it stays at the table's fast cadence (#105: the crowd comes from
+// a quick supply of schools, held near the crowd target by the director).
 export function cadenceFor(wave) {
   if (wave <= LAST_TABLE_WAVE) return tableRow(wave).cadence;
-  const k = wave - LAST_TABLE_WAVE;
-  return Math.max(0.5, 0.6 - 0.01 * k);
+  return CADENCE_BEYOND;
 }
 
 // Enemy counts for a wave, every scripted kind present (zero when absent).
@@ -131,6 +132,21 @@ export function countsFor(wave) {
 // Largest school a wave releases: 4 at wave 1, one more every schoolCapGrowEvery waves, capped at schoolMax.
 export function schoolCapFor(wave) {
   return Math.min(SPAWN.schoolMax, SPAWN.schoolMin + Math.floor((Math.max(1, wave) - 1) / SPAWN.schoolCapGrowEvery));
+}
+
+// Simultaneous caps for the shooting and lunging kinds (#105). Spitters: 2 early, one more every
+// spitterCapGrowEvery waves, up to spitterCapMax (5 late). Chargers: 2 early, up to 4.
+export function spitterCapFor(wave) {
+  return Math.min(SPAWN.spitterCapMax, SPAWN.spitterCapStart + Math.floor((Math.max(1, wave) - 1) / SPAWN.spitterCapGrowEvery));
+}
+
+export function chargerCapFor(wave) {
+  return Math.min(SPAWN.chargerCapMax, SPAWN.chargerCapStart + Math.floor((Math.max(1, wave) - 1) / SPAWN.chargerCapGrowEvery));
+}
+
+// The crowd director's target: live Drifters (alive plus warned) a school may not push past (#105).
+export function crowdTargetFor(wave) {
+  return Math.min(SPAWN.crowdMax, SPAWN.crowdBase + SPAWN.crowdPerWave * (Math.max(1, wave) - 1));
 }
 
 // Splits n Drifters into schools. Every school holds schoolMin..schoolMax (a remainder under schoolMin

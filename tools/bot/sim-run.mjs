@@ -73,7 +73,14 @@ export function runOne(seed, policy, { capSeconds = 300 } = {}) {
     killsByTypeCause: {},
     hits: [],
     waves: { 1: { startAt: 0, clearAt: null, hpLost: 0 } },
+    // Heals (#105): every real heal (not a bonus at full HP), with its source and the seconds spent below full
+    // health before it. belowSince is when the current below-full stretch began, null at full health.
+    heals: [],
+    belowSeconds: 0,
+    aliveSum: 0,      // enemies alive, summed over steps of tension waves (wave 3 on, not a release wave)
+    aliveSteps: 0,
   };
+  let belowSince = null;
 
   let dashBuf = 0;
   let pulseBuf = 0;
@@ -110,6 +117,13 @@ export function runOne(seed, policy, { capSeconds = 300 } = {}) {
 
     const events = drainEvents(game);
     checker.afterStep(events);
+    if (game.player.hp < PLAYER.maxHp) m.belowSeconds += SIM_DT;
+    if (game.wave.number >= 3 && !game.wave.release && game.wave.phase === 'active') {
+      let alive = 0;
+      for (const e of game.enemies) if (e.alive) alive += 1;
+      m.aliveSum += alive;
+      m.aliveSteps += 1;
+    }
     if (wasDashing && game.player.dash.active === null) lastDashEnd = game.time;
     // Seconds spent in each time-since-dash bucket, so hit counts can be read as rates.
     m.bucketSeconds[bucketFor(lastDashEnd === null ? null : game.time - lastDashEnd)] += SIM_DT;
@@ -178,8 +192,15 @@ export function runOne(seed, policy, { capSeconds = 300 } = {}) {
           const afterDeflect = lastDeflectAt !== null && game.time - lastDeflectAt <= 0.5;
           m.hits.push({ t: game.time, type, bucket, wave: game.wave.number, sameStep: since === 0, afterDeflect });
           if (m.waves[game.wave.number]) m.waves[game.wave.number].hpLost += 1;
+          if (belowSince === null) belowSince = game.time;
           break;
         }
+        case 'heal':
+          if (ev.bonus === 0) {
+            m.heals.push({ t: game.time, source: ev.source, wait: game.time - (belowSince ?? game.time) });
+            belowSince = ev.hp < PLAYER.maxHp ? game.time : null;
+          }
+          break;
         default:
           break;
       }

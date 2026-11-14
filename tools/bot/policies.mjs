@@ -74,10 +74,16 @@ function incomingBullets(game, horizon) {
 
 // ---- Beginner -------------------------------------------------------------------------------------
 // Moves away from the nearest enemy. Dashes rarely, and only at a close non-mine target. Never pulses.
+// Minimal human sense (#105): a bullet is noticed only once it has been in view for BEGINNER_SIGHT seconds,
+// and the beginner reacts to about half of the bullets it notices (decided once per bullet, from the
+// seeded rng). A reacting beginner sidesteps the bullet's line. Before #105 it never looked at bullets.
+const BEGINNER_SIGHT = 0.4; // seconds a bullet must be in view before this policy can react to it
+const BEGINNER_REACT = 0.5; // share of bullets this policy reacts to
+
 export const beginner = {
   name: 'beginner',
   salt: 0x1001,
-  createMemory: () => ({ lastDash: -Infinity }),
+  createMemory: () => ({ lastDash: -Infinity, seen: new Map(), react: new Map() }),
   decide(game, rng, mem) {
     const p = game.player;
     const out = blankIntent();
@@ -86,6 +92,23 @@ export const beginner = {
     const [wx, wy] = wallPush(p);
     out.moveX += wx;
     out.moveY += wy;
+
+    // Bullets it can see: each is stamped when first in view, and rolled once for whether it is reacted to.
+    const inView = incomingBullets(game, 3);
+    for (const th of inView) {
+      if (!mem.seen.has(th.b.id)) {
+        mem.seen.set(th.b.id, game.time);
+        mem.react.set(th.b.id, rng() < BEGINNER_REACT);
+      }
+    }
+    const threat = inView.find(
+      (th) => th.t <= 0.8 && mem.react.get(th.b.id) && game.time - mem.seen.get(th.b.id) >= BEGINNER_SIGHT,
+    );
+    if (threat) {
+      const [bx, by] = norm(threat.b.vx, threat.b.vy);
+      out.moveX += -by * 1.5; // sidestep the bullet's line
+      out.moveY += bx * 1.5;
+    }
 
     const close = nearest(game, notMine);
     if (

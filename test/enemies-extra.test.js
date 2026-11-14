@@ -58,8 +58,8 @@ test('the second round is scripted at low counts: Puffers 12, Bearers 13, Squid 
   }
 });
 
-test('existing kinds keep their counts: the new rows only add the new kinds', () => {
-  assert.equal(countsFor(12).drifter, 20);
+test('existing kinds keep their counts: the new rows only add the new kinds (Drifters follow #105)', () => {
+  assert.equal(countsFor(12).drifter, 210, 'Drifters follow the balance pass 2 crowd table (#105)');
   assert.equal(countsFor(12).shellback, 1);
   assert.equal(countsFor(14).charger, 4);
   assert.equal(countsFor(16).mine, 4);
@@ -654,7 +654,9 @@ test('a boss wave holds until its Warden dies: the next wave does not start whil
   assert.equal(g.wave.boss, null, 'the hold ends with the boss');
   let cleared = false;
   let started = false;
-  for (let i = 0; i < seconds(15) && !started; i++) {
+  // The loop runs until both the clear and the next wave's start have been seen: with the crowd (#105) the
+  // next wave may start as soon as the boss dies, before the old wave's last schools have been cleared.
+  for (let i = 0; i < seconds(40) && !(cleared && started); i++) {
     for (const e of g.enemies) if (e.alive && e.wave === 10) killEnemy(g, e, 1, 'dash');
     update(g, NONE, SIM_DT);
     for (const ev of drainEvents(g)) {
@@ -664,6 +666,27 @@ test('a boss wave holds until its Warden dies: the next wave does not start whil
   }
   assert.ok(cleared, 'wave 10 clears when its boss and the rest are down');
   assert.ok(started, 'wave 11 then starts');
+});
+
+test('a boss wave hands over after SPAWN.bossHoldLimit even while its Warden lives (#105: no stalled wave)', () => {
+  const g = createGame(7, { startWave: 10 });
+  g.time = SPAWN.drifterOnlyUntil;
+  let boss = null;
+  for (let i = 0; i < seconds(60) && !boss; i++) {
+    g.player.invuln = 1e9;
+    update(g, NONE, SIM_DT);
+    drainEvents(g);
+    boss = g.enemies.find((e) => e.kind === 'warden') ?? null;
+  }
+  assert.ok(boss, 'the Warden is released in wave 10');
+  // Keep the Warden alive and wave 10 active; the hold ends at the limit, and the next wave starts.
+  for (let i = 0; i < seconds(SPAWN.bossHoldLimit + 20) && g.wave.number === 10; i++) {
+    g.player.invuln = 1e9;
+    update(g, NONE, SIM_DT);
+    drainEvents(g);
+  }
+  assert.ok(boss.alive, 'the Warden still lives');
+  assert.equal(g.wave.number, 11, 'wave 11 has started');
 });
 
 // ---- Feedback fields and the soak ----------------------------------------------------------------

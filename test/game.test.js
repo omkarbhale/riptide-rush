@@ -621,7 +621,7 @@ test('after 30 s the script’s kinds appear, and every warning sits inside the 
   assert.ok(seen.has('spitter') && seen.has('shellback'), `kinds seen: ${[...seen]}`);
 });
 
-// A one-enemy non-release wave is already down to its stragglers, so wave 2 starts at once, with no breather.
+// A one-enemy non-release wave has no schools left to release, so wave 2 starts at once, with no breather (#105).
 test('a one-enemy non-release wave hands over to wave 2 at once (#97)', () => {
   const g = createGame(5);
   g.spawnQueue = [];
@@ -1136,23 +1136,37 @@ test('a school swims toward Rip and keeps its shape: members stay within two spa
   }
 });
 
-// Overlap: the next wave starts when the current one is down to 15% of its count, while stragglers fight on.
-test('the next wave starts when the current one is down to 15% of its count, with stragglers still alive (#97)', () => {
+// Crowd director (#105): the live Drifters never run far past the crowd target, however fast the queue is.
+test('live Drifters stay near the crowd target while the script runs (#105)', () => {
+  const g = createGame(9);
+  let peak = 0;
+  for (let i = 0; i < Math.round(40 / SIM_DT); i++) {
+    update(g, NONE, SIM_DT);
+    drainEvents(g);
+    const alive = g.enemies.filter((e) => e.alive && e.kind === 'drifter').length;
+    peak = Math.max(peak, alive);
+  }
+  // The target never exceeds crowdMax (50), and a school may overshoot it by at most one school.
+  assert.ok(peak <= SPAWN.crowdMax + SPAWN.schoolMax, `peak live Drifters ${peak}`);
+  assert.ok(peak >= 20, `the crowd builds up: peak ${peak}`);
+});
+
+// Overlap (#105): a non-release wave hands over once every one of its schools is released, so the next wave's
+// warnings show while the old schools are still alive.
+test('the next wave starts once the current wave has released every school, while its old schools still fight (#105)', () => {
   const g = createGame(5);
-  g.spawnQueue = [];
+  g.spawnQueue = [{ wave: 1, kind: 'drifter', size: 2, gap: 0.25 }]; // one school still to release
   g.warnings.length = 0;
   g.enemies.length = 0;
-  g.wave.total = 10;
-  g.liveWaves[0].total = 10;
   drainEvents(g);
-  const enemies = Array.from({ length: 10 }, (_, i) => spawnEnemy(g, 'drifter', 200 + i * 40, 300, 1));
-  for (let i = 0; i < 7; i++) killEnemy(g, enemies[i], 1);
+  spawnEnemy(g, 'drifter', 200, 300, 1);
+  spawnEnemy(g, 'drifter', 240, 300, 1);
   let events = collect(g, 0.05);
-  assert.ok(!kindOf(events, 'waveStart').length, 'seven left of ten: wave 2 waits');
-  killEnemy(g, enemies[7], 1);
+  assert.ok(!kindOf(events, 'waveStart').length, 'a school of wave 1 is still queued: wave 2 waits');
+  g.spawnQueue = []; // its last school has been released
   events = collect(g, 0.05);
-  assert.ok(kindOf(events, 'waveStart').some((ev) => ev.wave === 2), 'two left (15%): wave 2 starts');
-  assert.equal(g.enemies.filter((e) => e.alive && e.wave === 1).length, 2, 'the stragglers keep fighting');
+  assert.ok(kindOf(events, 'waveStart').some((ev) => ev.wave === 2), 'every school released: wave 2 starts');
+  assert.equal(g.enemies.filter((e) => e.alive && e.wave === 1).length, 2, 'the old schools keep fighting');
 });
 
 test('a wave that has not thinned out is handed over after SPAWN.waveTimeLimit regardless (#97)', () => {

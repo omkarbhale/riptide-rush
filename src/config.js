@@ -231,22 +231,35 @@ export const AGGRO = {
 
 export const SPAWN = {
   warning: 0.9,           // seconds of spawn-warning marker before an enemy appears
-  minDistFromPlayer: 280, // never spawn this close to the player
+  minDistFromPlayer: 560, // never spawn this close to the player
   safeTime: 0.4,          // newly spawned enemies cannot hurt for this long
   maxEntities: 200,       // live enemies + warnings + bullets; the wave script waits for room
   breather: 2.5,          // seconds between a release wave clearing and the next one starting
   groupLeadIn: 0.6,       // seconds from a wave starting to its first spawn
   drifterOnlyUntil: 30,   // run time (s) during which every spawn is a Drifter, to teach chaining
-  stragglers: 0.15,       // the next wave starts when the current one is down to this fraction of its count
   waveTimeLimit: 14,      // seconds after which the next wave starts even if the current one has many left
+  bossHoldLimit: 60,      // #105: a boss wave holds for its boss for at most this long, so a boss never stalls the run
   releaseTimeLimit: 24,   // a release wave waits for a clear, but never longer than this: progress cannot stop (#83)
   spitterGateDrifters: 2, // the first Spitter is released once this many Drifters or fewer are alive (#84)
   spitterGateTime: 12,    // ...and never waits longer than this many seconds after it first became due
+  // Simultaneous caps (#105): the scale of a crowd comes from Drifters; Spitters and Chargers stay countable so
+  // their bullets and lunges stay readable. A school of these waits until a slot is free.
+  spitterCapStart: 2,     // Spitters alive or warned at once, from wave 1
+  spitterCapGrowEvery: 4, // the cap grows by one every this many waves...
+  spitterCapMax: 5,       // ...and stops here
+  chargerCapStart: 2,     // Chargers alive or warned at once, from wave 1
+  chargerCapGrowEvery: 6, // the cap grows by one every this many waves...
+  chargerCapMax: 4,       // ...and stops here
   speedPerWave: 0.035,    // enemy movement speed grows by this fraction per wave, past wave 1, with no cap (#97)
-  schoolMin: 4,           // drifter schools hold at least this many (a smaller remainder is a school of its own)
+  schoolMin: 5,           // drifter schools hold at least this many (a smaller remainder is a school of its own)
   schoolMax: 8,           // ...and at most this many, the upper bound for the school cap
-  schoolCapGrowEvery: 4,  // the school cap grows by one every this many waves, from 4 at wave 1 to schoolMax
+  schoolCapGrowEvery: 3,  // the school cap grows by one every this many waves, from 4 at wave 1 to schoolMax
   schoolSpacing: 20,      // px between neighbours in a school's formation (tight: a dash through a school kills several)
+  // Crowd director (#105): Drifter schools are released only while the live Drifters (alive plus warned) stay under
+  // a target that climbs with the wave. Tension waves then hold a crowd of roughly 25-45 instead of a trickle.
+  crowdBase: 26,          // Drifters alive or warned at wave 1
+  crowdPerWave: 2,        // the target grows by this many per wave...
+  crowdMax: 50,           // ...and stops here
 };
 
 // Health recovery and modifier drops (#54). Logic lives in src/pickups.js.
@@ -263,10 +276,12 @@ export const PICKUP = {
   dropSpacing: 4,         // seconds between any two drops
   overflowScore: 200,     // base points when a heal lands at full HP (x multiplier)
   heal: {
-    baseChance: 0.005,    // per kill while hurt (#87: was 2%; heal orbs are rare, so recovery is earned)
+    baseChance: 0.002,    // per kill while hurt (#87: was 2%; random heal orbs stay rare, recovery is earned by combo)
     chancePerMissingHp: 0.005, // was 2% per missing hit point
-    pityKills: 150,       // guaranteed after this many hurt kills without one (was 40)
-    restore: 1,           // HP restored by one heal orb or a flawless wave
+    pityKills: 300,       // guaranteed after this many hurt kills without one (#105: was 150; kills are frequent in a crowd)
+    restore: 1,           // HP restored by one heal orb or a flawless release wave
+    comboTrigger: 20,     // #105: a hurt player who reaches this combo gets a guaranteed heal orb...
+    comboInterval: 25,    // ...at most once per this many seconds
   },
   modifierChance: 0.015,  // per kill (#87: was 5%; recovery and power-ups are earned, not every few seconds)
   modifierPityKills: 90,  // guaranteed after this many kills without a modifier drop
