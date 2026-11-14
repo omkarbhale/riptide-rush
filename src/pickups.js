@@ -49,9 +49,17 @@ export function hasModifier(game, kind) {
   return game.modifiers[kind] !== undefined;
 }
 
-// Max dash charges: 3, or 4 while Spark Coral is active.
+// The mode's max HP and base dash charges (game.rules, see createGame); config values when a game has no rules.
+function maxHpOf(game) {
+  return game.player.maxHp ?? PLAYER.maxHp;
+}
+function baseChargesOf(game) {
+  return game.rules?.maxCharges ?? DASH.maxCharges;
+}
+
+// Max dash charges: 3, or 4 while Spark Coral is active. A mode can set the base (Thin Reserve: 2).
 export function dashMaxCharges(game) {
-  return DASH.maxCharges + (hasModifier(game, 'sparkCoral') ? MODIFIER.sparkCoral.extraCharges : 0);
+  return baseChargesOf(game) + (hasModifier(game, 'sparkCoral') ? MODIFIER.sparkCoral.extraCharges : 0);
 }
 
 // Frenzy makes dash charges recharge 3x faster.
@@ -76,7 +84,7 @@ export function comboDrainScale(game) {
 export function onKill(game, e) {
   const s = game.pickups;
   const p = game.player;
-  const hurt = p.hp < PLAYER.maxHp;
+  const hurt = p.hp < maxHpOf(game);
 
   if (hurt) {
     s.healPity += 1;
@@ -104,7 +112,7 @@ export function onKill(game, e) {
 
 // Heal chance per kill while hurt: 2% plus 2% per missing hit point.
 export function healChance(game) {
-  return PICKUP.heal.baseChance + PICKUP.heal.chancePerMissingHp * (PLAYER.maxHp - game.player.hp);
+  return PICKUP.heal.baseChance + PICKUP.heal.chancePerMissingHp * (maxHpOf(game) - game.player.hp);
 }
 
 // Undertow: the enemies a shockwave from a kill at e reaches. Also records the ring visual.
@@ -235,8 +243,8 @@ function collect(game, it) {
 export function healPlayer(game, x, y, source) {
   const p = game.player;
   let bonus = 0;
-  if (p.hp < PLAYER.maxHp) {
-    p.hp = Math.min(PLAYER.maxHp, p.hp + PICKUP.heal.restore);
+  if (p.hp < maxHpOf(game)) {
+    p.hp = Math.min(maxHpOf(game), p.hp + PICKUP.heal.restore);
     pushFx(game, { kind: 'text', x, y: y - 22, text: `+${PICKUP.heal.restore} HP`, color: PICKUP_KINDS.heal.color, life: 0.9 });
   } else {
     bonus = PICKUP.overflowScore * comboMultiplier(game.combo.count);
@@ -261,7 +269,7 @@ function endModifier(game, kind) {
   delete game.modifiers[kind];
   if (kind === 'sparkCoral') {
     const d = game.player.dash;
-    d.charges = Math.min(d.charges, DASH.maxCharges);
+    d.charges = Math.min(d.charges, baseChargesOf(game));
   }
   game.events.push({ type: 'modifierEnd', kind });
 }

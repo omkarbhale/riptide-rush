@@ -1,13 +1,28 @@
 // Boot, fixed-timestep loop, screen state machine, and the wiring between the sim, the effects layer,
 // the sound layer and the renderer. Sim events go to feedback.js and hud.js; this file only handles state
 // changes, input routing and the saved options.
-import { SIM_DT, MAX_FRAME_DT, HIGH_SCORE_KEY, RESTART_GATE, LOGICAL_WIDTH, LOGICAL_HEIGHT } from './config.js';
+import { SIM_DT, MAX_FRAME_DT, RESTART_GATE, LOGICAL_WIDTH, LOGICAL_HEIGHT } from './config.js';
 import { createGame, update, drainEvents } from './game.js';
 import { createInput } from './input.js';
 import { drawFrame, currentZoom } from './render.js';
 import { createFx, FX_QUALITY_BURST_SCALE } from './fx.js';
 import { audio } from './audio.js';
 import { createFeedback } from './feedback.js';
+import {
+  MODES,
+  MODE_IDS,
+  bestScore,
+  dailyEntry,
+  dailyShareText,
+  isModeId,
+  loadMode,
+  recordRun,
+  rulesFor,
+  saveMode,
+  seedFor,
+  utcDayKey,
+} from './modes.js';
+import { copyText, hideShareField, modesHit, showShareField } from './modes-ui.js';
 import {
   OPTION_ROWS,
   activateSetting,
@@ -36,11 +51,20 @@ function storage() {
 }
 
 // screen: 'title' | 'playing' | 'paused' | 'over'
+// mode: the mode picked on the title screen (remembered). It only changes on the title screen, so it is also
+// the mode of the run in progress. bests: each mode's best (Daily Tide: today's official score).
 const app = {
   screen: 'title',
   game: createGame(newSeed()),
   hud: createHud(),
-  highScore: loadHighScore(),
+  mode: loadMode(storage()),
+  dayKey: utcDayKey(), // today's UTC date, refreshed on the title screen
+  runDayKey: utcDayKey(), // the UTC date the current or last run started on
+  bests: {},
+  daily: { official: null, plays: 0 },
+  official: false, // the last run was today's official Daily Tide result
+  share: null, // { state: 'pending' | 'copied' | 'fallback', at } for the share prompt
+  lastRun: { score: 0, wave: 0, combo: 0 },
   newBest: false,
   overAge: 0,
   settings: loadSettings(storage()),
@@ -57,21 +81,52 @@ function newSeed() {
   return (Math.floor(Math.random() * 0x7fffffff) ^ Date.now()) >>> 0;
 }
 
-// localStorage can be missing or throw (private windows, blocked storage); the game still works.
-function loadHighScore() {
-  try {
-    return Number(window.localStorage.getItem(HIGH_SCORE_KEY)) || 0;
-  } catch {
-    return 0;
-  }
+// Reads every mode's best and today's daily entry. localStorage can be missing or throw (private windows,
+// blocked storage); the helpers in modes.js give the defaults, and the game still works.
+function refreshBests() {
+  const s = storage();
+  app.dayKey = utcDayKey();
+  app.bests = Object.fromEntries(MODE_IDS.map((id) => [id, bestScore(s, id, app.dayKey)]));
+  app.daily = dailyEntry(s, app.dayKey);
+}
+refreshBests();
+
+// What the mode UI needs this frame (see modes-ui.js).
+function modesView() {
+  return {
+    mode: app.mode,
+    dayKey: app.dayKey,
+    runDayKey: app.runDayKey,
+    bests: app.bests,
+    daily: app.daily,
+    official: app.official,
+    share: app.share,
+  };
 }
 
-function saveHighScore(value) {
-  try {
-    window.localStorage.setItem(HIGH_SCORE_KEY, String(value));
-  } catch {
-    // keep the best score in memory for this page only
-  }
+function selectMode(id) {
+  if (app.screen !== 'title' || !isModeId(id)) return;
+  app.mode = id;
+  saveMode(storage(), id);
+  refreshBests();
+}
+
+function cycleMode(step) {
+  const i = MODE_IDS.indexOf(app.mode);
+  selectMode(MODE_IDS[(i + step + MODE_IDS.length) % MODE_IDS.length]);
+}
+
+// The share prompt: only an official Daily Tide result can be shared. Copies the one-line result, or shows it
+// in a selectable field when the clipboard refuses.
+function share() {
+  if (app.screen !== 'over' || !app.official) return;
+  const text = dailyShareText(app.runDayKey, app.lastRun);
+  app.share = { state: 'pending', at: app.time };
+  copyText(text).then((state) => {
+    if (app.screen !== 'over') return;
+    app.share = { state, at: app.time };
+    if (state === 'fallback') showShareField(text, app.layout);
+  });
 }
 
 // Audio is created on the first user gesture (browsers refuse an AudioContext before one).
@@ -99,6 +154,14 @@ window.addEventListener('keydown', unlockAudio, true);
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM' && !e.repeat) changeSettings({ ...app.settings, muted: !app.settings.muted });
+  if (e.repeat) return;
+  // Keys 1-4 pick the mode on the title screen; C copies the share line on the game-over card.
+  if (app.screen === 'title') {
+    const mode = Object.values(MODES).find((m) => m.key === e.key);
+    if (mode) selectMode(mode.id);
+  } else if (app.screen === 'over' && e.code === 'KeyC') {
+    share();
+  }
 });
 
 // ---- pointer mapping ------------------------------------------------------------------------------
@@ -124,8 +187,21 @@ function mapPoint(clientX, clientY) {
 // A left click inside the pause options panel is handled here and never resumes the game. A click
 // outside the panel is not claimed, so it resumes as before.
 function claimPointer(button, clientX, clientY) {
-  if (app.screen !== 'paused' || button !== 0) return false;
+  if (button !== 0) return false;
   const p = cssPoint(clientX, clientY);
+  // The mode picker on the title screen and the share button on the game-over card take their own clicks.
+  if (app.screen === 'title') {
+    const hit = modesHit(app.layout, 'title', p.x, p.y, modesView());
+    if (hit?.kind !== 'mode') return false;
+    selectMode(hit.id);
+    return true;
+  }
+  if (app.screen === 'over') {
+    if (modesHit(app.layout, 'over', p.x, p.y, modesView())?.kind !== 'share') return false;
+    share();
+    return true;
+  }
+  if (app.screen !== 'paused') return false;
   const hit = pauseHit(app.layout, p.x, p.y);
   if (!hit) return false;
   if (hit.row !== null) {
@@ -136,11 +212,17 @@ function claimPointer(button, clientX, clientY) {
   return true;
 }
 
+// A run starts in the remembered mode. Daily Tide uses the day's seed and mutator; the others use a random seed
+// and their own rule overrides (One Life: 1 HP; No Pulse: Pulse off).
 function startRun() {
-  app.game = createGame(newSeed());
+  app.runDayKey = utcDayKey();
+  app.game = createGame(seedFor(app.mode, app.runDayKey, newSeed()), { rules: rulesFor(app.mode, app.runDayKey) });
   app.hud = createHud();
   app.screen = 'playing';
   app.newBest = false;
+  app.official = false;
+  app.share = null;
+  hideShareField();
   app.overAge = 0;
   app.acc = 0;
   input.reset();
@@ -161,14 +243,16 @@ function resume() {
   feedback.setPaused(false);
 }
 
-function endRun(score) {
+// Records the run under its mode (per-mode best, or the day's official result for Daily Tide).
+function endRun(score, peakCombo) {
   app.screen = 'over';
   app.overAge = 0;
-  if (score > app.highScore) {
-    app.highScore = score;
-    app.newBest = true;
-    saveHighScore(score);
-  }
+  const wave = app.game.wave.number;
+  const result = recordRun(storage(), app.mode, app.runDayKey, { score, wave, combo: peakCombo });
+  app.newBest = result.newBest && app.mode !== 'daily'; // Daily Tide shows its official result instead
+  app.official = result.official;
+  app.lastRun = { score, wave, combo: peakCombo };
+  refreshBests();
   input.reset();
 }
 
@@ -176,10 +260,13 @@ function handleAction(action) {
   switch (app.screen) {
     case 'title':
       if (action === 'confirm' || action === 'select') startRun();
+      else if (action === 'left') cycleMode(-1);
+      else if (action === 'right') cycleMode(1);
       break;
     case 'playing':
       if (action === 'pause') pause();
-      else if (action === 'dash' || action === 'pulse') input.press(action);
+      else if (action === 'dash') input.press(action);
+      else if (action === 'pulse' && app.game.rules.pulse) input.press(action); // No Pulse: the press is ignored
       break;
     case 'paused':
       if (action === 'pause' || action === 'confirm') resume();
@@ -220,15 +307,18 @@ function simStep() {
   if (app.screen !== 'playing') return;
   update(app.game, input.snapshot(), SIM_DT);
   const events = drainEvents(app.game);
+  let finalScore = null;
   for (const ev of events) {
     // A dash or pulse has fired: clear its buffered press so it cannot fire twice.
     if (ev.type === 'dash') input.consume('dash');
     else if (ev.type === 'pulse') input.consume('pulse');
-    else if (ev.type === 'gameOver') endRun(ev.score);
+    else if (ev.type === 'gameOver') finalScore = ev.score;
     else if (ev.type === 'kill') feelKill(ev);
   }
   hudEvents(app.hud, events, app.game);
   feedback.handleStep(events, app.game);
+  // The run is recorded after the HUD has seen this step's events, so the peak combo includes them.
+  if (finalScore !== null) endRun(finalScore, app.hud.peakCombo);
 }
 
 // Adaptive quality. The average frame interval is taken over 2 s of real time: above 20 ms the effects step
@@ -276,6 +366,9 @@ function frame(now) {
   if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
   app.time += dt;
 
+  // The title screen shows today's record; a page left open past UTC midnight picks up the new day here.
+  if (app.screen === 'title' && utcDayKey() !== app.dayKey) refreshBests();
+
   const live = app.screen === 'playing' || app.screen === 'over';
   if (live) {
     const scale = fx.update(dt);
@@ -299,7 +392,8 @@ function frame(now) {
     alpha: app.acc / SIM_DT,
     time: app.time,
     dt: live ? dt : 0,
-    highScore: app.highScore,
+    highScore: app.bests[app.mode] ?? 0,
+    modes: modesView(),
     newBest: app.newBest,
     overAge: app.overAge,
     muted: app.settings.muted,
