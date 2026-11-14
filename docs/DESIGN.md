@@ -185,11 +185,11 @@ Recovery and power are earned by chaining, and they pull Rip toward the fight. N
 
 | Parameter | Value |
 |---|---|
-| Chance per kill | 0.5% + 0.5% per missing hit point (1% at 2 HP, 1.5% at 1 HP). Rarer than the first draft on purpose: recovery is earned, not automatic (#87, balance pass) |
-| Combo tier guarantee | None. A tier-up while hurt no longer forces a heal (#87) |
-| Pity | Guaranteed on the 150th kill while hurt without a heal drop |
+| Chance per kill | 0.2% + 0.5% per missing hit point (0.7% at 2 HP, 1.2% at 1 HP). Random orbs stay rare; recovery is mostly earned by chaining (#87; #105 lowered the base chance) |
+| Combo guarantee | A hurt player who reaches combo 20 is owed a heal orb. It drops at the next kill once at least 25 s have passed since the last combo orb (#105). The orb waits, due, while the field is full or the drop spacing is still running |
+| Pity | Guaranteed on the 300th kill while hurt without a heal drop (#105: was 150; kills are frequent in a crowd) |
 | Collect | Restores 1 HP |
-| Flawless wave | None. A cleared wave with no HP lost restores nothing (#87) |
+| Flawless release wave | A release wave (3, 5, 9, 11, 15, 18, ...) that cost no HP while it was live restores 1 HP if Rip is hurt (#105). Tension waves heal nothing |
 | Full HP | A heal that would restore HP converts to bonus score: 200 × multiplier. Never wasted |
 
 **Modifier drops.** Each lasts a few seconds, shows a countdown bar in the HUD (one row per modifier, under the combo), and stacks by refreshing its timer.
@@ -536,6 +536,8 @@ Each open question below has a matching GitHub issue labelled `design` with a co
 
 ### 7.4 Balance pass: schools, overlap, pressure, the ramp (#97)
 
+> Superseded in part by §7.5 (#105): the school size and cap, the cadence, the overlap rule (a wave now hands over when its last school is released, not at 15%), the beyond-20 budget (120 + 12k), and the Drifter counts. The rules below that §7.5 does not mention still stand.
+
 The balance pass made the field denser and waves overlap, so a dash can kill several enemies and the difficulty keeps rising. It was tuned against the headless bot harness (`tools/bot/`, report in `docs/playtests/003-balance-pass.md`). Source: `src/waves.js`, `src/game.js`, `src/config.js`.
 
 **Schools.** Drifters arrive in schools of 4–8 that swim in a formation: a line across the front, a wedge led by one member, or a ring. A school's anchor swims toward Rip at 0.8× chase speed and faces her; members hold their slot and chase Rip directly once she is within 120 px. Every other kind comes alone. The school cap grows by one every 4 waves, from 4 at wave 1 to 8 from wave 17. Splitter minis keep the split ring. A dash through a school's line kills several at once.
@@ -555,3 +557,29 @@ The balance pass made the field denser and waves overlap, so a dash can kill sev
 **Wave 14 (#88).** Four Chargers (was two).
 
 **Combo tiers (#58).** 10/20/30/40, as in §3.10.
+
+### 7.5 Balance pass 2: crowd density and earned healing (#105)
+
+The arena was too empty for flow: schools died on arrival and about ten enemies were alive, so an expert made about 80 actions per minute. This pass makes the crowd the design, and makes recovery reliably earnable by playing well. Tuned against the harness (`tools/bot/`, report in `docs/playtests/004-balance-pass-2.md`). Source: `src/waves.js`, `src/game.js`, `src/config.js`, `src/pickups.js`.
+
+**Drifters are the crowd.** Waves 3 to 20 carry 150 to 240 Drifters each (wave 21 carries 86; waves 1 and 2 carry 16 and 24, and the first 30 s are Drifter-only to teach chaining). A wave is long enough to keep the crowd full for its whole run. Drifters are numerous, slow (a school swims at 0.8 × 95 px/s) and touch only a Rip who stops: at contact range they are as lethal as before. The count scales, not the lethality.
+
+**Crowd director.** A Drifter school is released only while the live Drifters on the field stay under a target that climbs with the wave: 26 at wave 1, plus 2 a wave, to 50 (`SPAWN.crowdBase`, `crowdPerWave`, `crowdMax`). Warnings do not count, so the next schools can show their warnings while the current ones are still alive. The aim is a standing crowd of about 25–45 during tension waves.
+
+**Schools.** Drifter schools hold 5–8 Drifters (a remainder under 5 is its own school). The cap grows one every 3 waves from 5 at wave 1 to 8 from wave 10. A school of 9 is kept whole, because nine cannot split into two schools of five or more. Schools are released every 0.2 s, several at once from different sides. A school spawns at least 560 px from Rip, so it takes the time to cross the arena before a dash can reach it.
+
+**Overlapping waves.** A non-release wave hands over to the next wave once every one of its schools has been released, so the next wave's warnings show while this wave's schools are still alive. The 14 s limit still applies. Release waves keep their 2.5 s breather and run to a clear, as in §7.4.
+
+**Caps on the shooting and lunging kinds.** Simultaneous Spitters (alive or warned) are capped at 2, rising by one every 4 waves to 5. Chargers are capped at 2, rising by one every 6 waves to 4. A school of either kind waits until a slot is free. Drifters are never capped.
+
+**Earned healing.** Three sources, and no others:
+- **Combo heal orb.** A hurt player who reaches combo 20 is owed a heal orb, dropped at the next kill, at most once per 25 s (`PICKUP.heal.comboTrigger`, `comboInterval`). Chaining while hurt brings HP back.
+- **Flawless release wave.** A release wave that cost no HP while it was live restores 1 HP if Rip is hurt (see §3.9a).
+- **Random orb.** Rare: 0.2% per kill while hurt, plus 0.5% per missing hit point, and a pity on the 300th hurt kill.
+
+**Beyond wave 20.** The budget is 120 + 12k points (was 60 + 9k), with Drifters taking 60% of it. The cadence stays at 0.2 s. The director, not the cadence, sets the crowd.
+
+**Bot sense (harness only).** The beginner bot now sees a Spitter bullet only after 400 ms in view, and reacts to about half of the bullets (decided per bullet). It was blind to bullets before. The change makes the beginner numbers not comparable with playtest 003.
+
+**Edge rule.** The release gate reads the field once per decision (`gateCounts`), so a blocked queue costs one pass per step, not one per entry. The sim filters the enemy and bullet lists only when something died. Neither changes what happens in a run.
+

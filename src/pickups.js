@@ -38,7 +38,9 @@ export function createPickupState() {
     healPity: 0,        // hurt kills since the last heal drop
     modPity: 0,         // kills since the last modifier drop
     shieldGrace: 0,    // seconds of contact-damage grace left after a Shield Scale absorbs a hit
-    waveHurt: false,    // HP was lost during the current wave
+    hurts: 0,           // HP lost so far this run; a wave is flawless when this has not moved while it was live (#105)
+    comboDue: false,    // a hurt player reached the combo trigger and the guaranteed heal orb is still owed (#105)
+    comboOrbAt: -Infinity, // when the last combo heal orb dropped; the next may come after comboInterval (#105)
     fx: [],
   };
 }
@@ -71,8 +73,11 @@ export function comboDrainScale(game) {
 
 // ---- Hooks called from game.js -------------------------------------------------------------
 
-// Kill hook (after combo and score). Rolls at most one drop per kill: a heal while hurt, then a modifier roll.
-// A combo tier reached while hurt no longer guarantees a heal (#87): recovery is a chance per kill, with a pity.
+// Kill hook (after combo and score). Rolls at most one heal drop and one modifier drop per kill.
+// Healing (#105) is earned two ways, and random orbs stay rare:
+//  - a hurt player who reaches the combo trigger (20) is owed a heal orb, at most one per comboInterval.
+//    The orb waits as "due" until it can drop (a free slot, the drop spacing), so a busy field cannot eat it.
+//  - a random heal orb while hurt: a small chance per kill, with a pity count (#87).
 export function onKill(game, e) {
   const s = game.pickups;
   const p = game.player;
@@ -81,15 +86,25 @@ export function onKill(game, e) {
   if (hurt) {
     s.healPity += 1;
   } else {
-    // Heal drops only happen while hurt, so the pity counter resets at full HP.
+    // Heal drops only happen while hurt, so the pity counter and any owed combo orb reset at full HP.
     s.healPity = 0;
+    s.comboDue = false;
   }
   s.modPity += 1;
 
-  if (hurt) {
+  if (hurt && game.combo.count >= PICKUP.heal.comboTrigger) s.comboDue = true;
+  let healDropped = false;
+  if (hurt && s.comboDue && game.time - s.comboOrbAt >= PICKUP.heal.comboInterval && canDrop(game)) {
+    spawnPickup(game, 'heal', e.x, e.y, 'combo');
+    s.comboOrbAt = game.time;
+    s.comboDue = false;
+    s.healPity = 0;
+    healDropped = true;
+  }
+  if (hurt && !healDropped) {
     const guaranteed = s.healPity >= PICKUP.heal.pityKills;
     if ((guaranteed || game.rng() < healChance(game)) && canDrop(game)) {
-      spawnPickup(game, 'heal', e.x, e.y);
+      spawnPickup(game, 'heal', e.x, e.y, 'drop');
       s.healPity = 0;
     }
   }
@@ -184,15 +199,19 @@ export function absorbHit(game, fromX, fromY) {
   return true;
 }
 
-// Hurt hook, called after HP is lost.
+// Hurt hook, called after HP is lost. Counts the hit, so a wave can tell whether it was taken clean.
 export function onHurt(game) {
-  game.pickups.waveHurt = true;
+  game.pickups.hurts += 1;
 }
 
-// Wave-clear hook, called when a wave clears. Recovery is earned, not automatic (#87): a flawless wave no
-// longer restores HP. Only heal orbs do, and a combo tier reached while hurt makes the next one due.
-export function onWaveEnd(game) {
-  game.pickups.waveHurt = false;
+// Wave-clear hook, called when a wave clears. A release wave that cost no HP while it was live (since
+// `rec.hurtsAt`, the hurt count when it began) heals 1 HP if Rip is hurt (#105). Other waves heal nothing:
+// recovery is otherwise earned by chaining (the combo orb), and random orbs stay rare (#87).
+export function onWaveEnd(game, rec) {
+  if (!rec.release || game.pickups.hurts !== rec.hurtsAt) return;
+  const p = game.player;
+  if (p.hp >= PLAYER.maxHp) return;
+  healPlayer(game, p.x, p.y, 'flawless');
 }
 
 // ---- Internals -----------------------------------------------------------------------------
@@ -202,13 +221,15 @@ function canDrop(game) {
   return game.time - game.pickups.lastDropAt >= PICKUP.dropSpacing && game.pickups.items.length < PICKUP.maxOnField;
 }
 
-function spawnPickup(game, kind, x, y) {
+// origin says why a heal orb exists: 'drop' (random, rare) or 'combo' (the combo-trigger guarantee).
+function spawnPickup(game, kind, x, y, origin = 'drop') {
   const s = game.pickups;
   const a = game.rng() * Math.PI * 2;
   const [cx, cy] = clampToArena(x, y, PICKUP.radius);
   const item = {
     id: game.nextId++,
     kind,
+    origin,
     x: cx,
     y: cy,
     vx: Math.cos(a) * PICKUP.popSpeed,
@@ -225,7 +246,7 @@ function collect(game, it) {
   game.events.push({ type: 'pickup', kind: it.kind, x: it.x, y: it.y });
   pushFx(game, { kind: 'ring', x: it.x, y: it.y, r: 28, life: 0.3, color: PICKUP_KINDS[it.kind].color });
   if (it.kind === 'heal') {
-    healPlayer(game, it.x, it.y, 'drop');
+    healPlayer(game, it.x, it.y, it.origin ?? 'drop');
   } else {
     grantModifier(game, it.kind);
   }

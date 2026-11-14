@@ -12,6 +12,9 @@ import {
   planWave,
   chunkSchools,
   schoolCapFor,
+  spitterCapFor,
+  chargerCapFor,
+  crowdTargetFor,
   formationOffsets,
   POINT_COSTS,
 } from '../src/waves.js';
@@ -32,7 +35,7 @@ test('every table row uses only kinds that exist in the sim, with whole non-nega
       assert.ok(Number.isInteger(n) && n >= 0, `wave ${row.wave} ${kind} count ${n}`);
     }
     assert.ok(sum(row.counts) > 0, `wave ${row.wave} is not empty`);
-    assert.ok(row.cadence >= 0.5 && row.cadence <= 2.0, `wave ${row.wave} cadence ${row.cadence}`);
+    assert.ok(row.cadence >= 0.2 && row.cadence <= 2.0, `wave ${row.wave} cadence ${row.cadence}`);
   }
 });
 
@@ -64,16 +67,16 @@ test('pacing: no more than three tension waves (intensity 6+) in a row, and each
   }
 });
 
-test('the point budget beyond wave 20 is 60 + 9k and has no cap, so waves keep scaling (#97)', () => {
-  assert.equal(budgetFor(21), 69);
-  assert.equal(budgetFor(30), 150);
-  assert.equal(budgetFor(40), 240);
+test('the point budget beyond wave 20 is 120 + 12k and has no cap, so waves keep scaling (#97, #105)', () => {
+  assert.equal(budgetFor(21), 132);
+  assert.equal(budgetFor(30), 240);
+  assert.equal(budgetFor(40), 360);
   assert.ok(budgetFor(500) > budgetFor(40), 'the budget keeps growing');
 });
 
-test('cadence beyond 20 falls from 0.59 s to a floor of 0.5 s between schools', () => {
-  assert.ok(Math.abs(cadenceFor(21) - 0.59) < 1e-9);
-  assert.equal(cadenceFor(200), 0.5, 'the cadence floors at 0.5 s');
+test('cadence beyond 20 holds the fast table cadence of 0.2 s between schools (#105)', () => {
+  assert.equal(cadenceFor(21), 0.2);
+  assert.equal(cadenceFor(200), 0.2, 'the crowd director, not the cadence, limits the crowd');
 });
 
 test('release waves beyond 20 fall on every 5th wave that is not a 10th (the boss wave is not in the sim)', () => {
@@ -83,13 +86,14 @@ test('release waves beyond 20 fall on every 5th wave that is not a 10th (the bos
   assert.equal(isReleaseWave(22), false);
 });
 
-test('chunkSchools splits Drifters into schools of 4-8 that sum to the count', () => {
-  assert.deepEqual(chunkSchools(9, 4), [5, 4]);
+test('chunkSchools splits Drifters into schools of 5-8 that sum to the count (#105)', () => {
+  // Nine cannot split into two schools of five or more, so nine is one school of nine (the one exception).
+  assert.deepEqual(chunkSchools(9, 8), [9], 'nine stays one school: two would be under five');
   assert.deepEqual(chunkSchools(31, 8), [8, 8, 8, 7]);
-  assert.deepEqual(chunkSchools(3), [3], 'a remainder under 4 is a school of its own');
+  assert.deepEqual(chunkSchools(3), [3], 'a remainder under five is a school of its own');
   assert.deepEqual(chunkSchools(0), []);
-  for (let cap = 4; cap <= 8; cap++) {
-    for (let n = 4; n <= 200; n++) {
+  for (let cap = 5; cap <= 8; cap++) {
+    for (let n = 10; n <= 200; n++) {
       const sizes = chunkSchools(n, cap);
       assert.equal(sizes.reduce((a, b) => a + b, 0), n, `n ${n} cap ${cap} sums`);
       assert.ok(sizes.every((s) => s >= SPAWN.schoolMin && s <= SPAWN.schoolMax), `n ${n} cap ${cap} sizes ${sizes}`);
@@ -98,10 +102,10 @@ test('chunkSchools splits Drifters into schools of 4-8 that sum to the count', (
   }
 });
 
-test('the school cap grows with the wave: 4 at wave 1, 8 from wave 17 on', () => {
-  assert.equal(schoolCapFor(1), 4);
-  assert.equal(schoolCapFor(5), 5);
-  assert.equal(schoolCapFor(17), 8);
+test('the school cap grows with the wave: 5 at wave 1, one more every 3 waves, 8 from wave 10 on (#105)', () => {
+  assert.equal(schoolCapFor(1), 5);
+  assert.equal(schoolCapFor(4), 6);
+  assert.equal(schoolCapFor(10), 8);
   assert.equal(schoolCapFor(200), 8);
 });
 
@@ -116,7 +120,7 @@ test('a plan is built from the table: every enemy is in a school, and every Drif
     }
   }
   const w1 = planWave(1);
-  assert.deepEqual(w1.schools.map((s) => s.size), [4, 4, 4, 4], 'wave 1 is four schools of four');
+  assert.deepEqual(w1.schools.map((s) => s.size), [6, 5, 5], 'wave 1: 16 Drifters in three schools, 6/5/5 (#105)');
 });
 
 test('wave 50 is a valid, bounded plan: every kind is scripted, the budget is respected, and it has enemies', () => {
@@ -161,4 +165,21 @@ test('formation offsets: a line runs across the front, a wedge leads with one me
   const ring = formationOffsets('ring', 8, 20);
   for (const o of ring) assert.ok(Math.abs(Math.hypot(o.x, o.y) - Math.max(20, (8 * 20) / (2 * Math.PI))) < 1e-9);
   assert.deepEqual([...FORMATIONS], ['line', 'wedge', 'ring']);
+});
+
+test('Spitters and Chargers are capped at once: 2 early, up to 5 and 4 late (#105)', () => {
+  assert.equal(spitterCapFor(1), 2);
+  assert.equal(spitterCapFor(5), 3);
+  assert.equal(spitterCapFor(13), 5);
+  assert.equal(spitterCapFor(200), 5, 'the Spitter cap stops at five');
+  assert.equal(chargerCapFor(1), 2);
+  assert.equal(chargerCapFor(7), 3);
+  assert.equal(chargerCapFor(200), 4, 'the Charger cap stops at four');
+});
+
+test('the crowd director targets 26 Drifters at wave 1, climbing 2 a wave to 50 (#105)', () => {
+  assert.equal(crowdTargetFor(1), 26);
+  assert.equal(crowdTargetFor(3), 30);
+  assert.equal(crowdTargetFor(12), 48);
+  assert.equal(crowdTargetFor(200), 50);
 });

@@ -114,6 +114,7 @@ test('heal pity guarantees a heal drop on the pityKills-th kill while hurt', () 
   let firstHeal = -1;
   for (let kill = 1; kill <= PICKUP.heal.pityKills + 5; kill++) {
     g.pickups.items = [];
+    g.combo.count = 0; // keep the chain under the combo-20 guarantee (#105), so this test sees only the pity
     killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
     if (firstHeal < 0 && g.pickups.items.some((it) => it.kind === 'heal')) firstHeal = kill;
   }
@@ -400,26 +401,99 @@ test('a heal collected at full HP converts to bonus score', () => {
 // A wave clears when its queue is empty and every enemy it spawned is dead. These tests empty the queue
 // and let the spawner notice on the next step, which is the real waveClear path.
 function clearWave(g) {
-  g.wave.queue = [];
+  g.spawnQueue = [];
   g.warnings = [];
   g.enemies = [];
   update(g, NONE, SIM_DT);
 }
 
-test('a cleared wave no longer restores HP by itself: recovery is earned from heal orbs (#87)', () => {
+// Marks wave 1 (the only live wave of a fresh game) as a release wave or not, as the wave table would.
+function makeRelease(g, release) {
+  g.liveWaves[0].release = release;
+}
+
+test('a flawless release wave heals 1 HP when Rip is hurt (#105)', () => {
   const g = createGame(1);
   g.player.hp = 2;
+  makeRelease(g, true);
   clearWave(g);
-  assert.equal(g.player.hp, 2, 'a flawless clear does not heal');
-  assert.equal(takeEvents(g, 'heal').filter((ev) => ev.source === 'flawless').length, 0, 'no flawless heal');
+  assert.equal(g.player.hp, 3, 'one HP back for a clean release wave');
+  const heals = takeEvents(g, 'heal');
+  assert.equal(heals.length, 1);
+  assert.equal(heals[0].source, 'flawless');
+  assert.equal(heals[0].bonus, 0, 'a real heal, not a bonus');
 });
 
-test('a flawless clear at full HP adds no bonus score (#87)', () => {
+test('a release wave that cost HP while it was live is not flawless (#105)', () => {
   const g = createGame(1);
+  g.player.hp = 2;
+  makeRelease(g, true);
+  g.pickups.hurts += 1; // a hit landed while this wave was live
+  clearWave(g);
+  assert.equal(g.player.hp, 2, 'no flawless heal after a hit');
+  assert.equal(takeEvents(g, 'heal').length, 0);
+});
+
+test('a flawless non-release wave does not heal (#105: release waves only)', () => {
+  const g = createGame(1);
+  g.player.hp = 2;
+  makeRelease(g, false);
+  clearWave(g);
+  assert.equal(g.player.hp, 2, 'no heal on a tension wave');
+  assert.equal(takeEvents(g, 'heal').length, 0);
+});
+
+test('a flawless release clear at full HP adds no bonus score (#87)', () => {
+  const g = createGame(1);
+  makeRelease(g, true);
   const before = g.score;
   clearWave(g);
   assert.equal(g.score, before, 'no bonus score from a clear');
   assert.equal(takeEvents(g, 'heal').length, 0, 'no heal event');
+});
+
+test('a hurt player who reaches combo 20 gets a guaranteed heal orb (#105)', () => {
+  const g = quiet();
+  g.player.hp = 2;
+  constantRng(g, 0.99); // no random heal or modifier rolls succeed
+  for (let kill = 1; kill < PICKUP.heal.comboTrigger; kill++) {
+    g.pickups.items = [];
+    killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
+  }
+  assert.equal(g.pickups.items.filter((it) => it.kind === 'heal').length, 0, 'no orb before combo 20');
+  g.pickups.items = [];
+  killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
+  const orbs = g.pickups.items.filter((it) => it.kind === 'heal');
+  assert.equal(orbs.length, 1, 'the orb drops on combo 20');
+  assert.equal(orbs[0].origin, 'combo');
+});
+
+test('the combo-20 orb comes at most once per comboInterval seconds (#105)', () => {
+  const g = quiet();
+  g.player.hp = 2;
+  constantRng(g, 0.99);
+  const drops = [];
+  // Each kill is 4.1 s after the last, so the 25 s limit lands on a later kill, not every kill.
+  for (let kill = 1; kill <= 60; kill++) {
+    g.pickups.items = [];
+    killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
+    if (g.pickups.items.some((it) => it.kind === 'heal' && it.origin === 'combo')) drops.push(g.time);
+  }
+  assert.ok(drops.length >= 2, 'the chain earns more than one orb');
+  for (let i = 1; i < drops.length; i++) {
+    assert.ok(drops[i] - drops[i - 1] >= PICKUP.heal.comboInterval, `orbs ${drops[i] - drops[i - 1]} s apart`);
+  }
+});
+
+test('a combo-20 orb is not owed to a player who is not hurt (#105)', () => {
+  const g = quiet();
+  constantRng(g, 0.99);
+  for (let kill = 1; kill <= PICKUP.heal.comboTrigger + 2; kill++) {
+    g.pickups.items = [];
+    killAt(g, 500, 300, PICKUP.dropSpacing + 0.1);
+  }
+  assert.equal(g.pickups.items.filter((it) => it.kind === 'heal').length, 0, 'no heal orb at full HP');
+  assert.equal(g.pickups.comboDue, false);
 });
 
 test('healPlayer restores up to max and never above it', () => {
