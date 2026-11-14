@@ -150,6 +150,76 @@ export const ENEMY = {
     fuse: 0.8,              // seconds from arming to detonation
     blastRadius: 90,        // px; hurts Rip and kills other enemies inside it
   },
+  // #114: the second round of enemies (issues #19, #20, #22, #24, #38). Behaviour lives in src/enemies-extra.js.
+  puffer: {
+    radius: 16,
+    points: 20,
+    speed: 90,              // px/s chase speed
+    steer: 3,               // velocity blend rate per second
+    swellRange: 40,         // px: inside this a Puffer stops and swells; the swell's end bursts it
+    swellTime: 0.6,         // seconds of swell before the self-burst
+    shardCount: 8,          // shards per burst
+    shardSpeed: 260,        // px/s
+    shardRange: 90,         // px a shard travels before it fades
+    shardRadius: 4,         // px, the shard's own touch radius
+    knockback: 40,          // px a Pulse stagger pushes it back (no burst)
+  },
+  shieldbearer: {
+    radius: 22,
+    points: 40,
+    hp: 2,                  // a dash that does not kill it takes one hit point and refunds nothing
+    speed: 70,              // px/s chase speed
+    steer: 2,
+    auraRadius: 120,        // px: Drifters and Spitters inside this carry a Barrier
+    auraOffTime: 1.0,       // seconds the aura is down after a Pulse stagger (also the stagger length)
+  },
+  inksquid: {
+    radius: 18,
+    points: 35,
+    speed: 120,             // px/s while repositioning
+    steer: 3,
+    minRange: 320,          // backs away inside this distance from Rip
+    maxRange: 420,          // closes in beyond this distance
+    lobInterval: 2.2,       // seconds between lobs
+    firstLobDelay: 1.2,     // seconds before the first lob
+    lobLead: 0.4,           // the arc lands this many seconds ahead of Rip's velocity
+    flightTime: 1.0,        // seconds an arc is in the air
+    shellRadius: 6,         // px, the arc's own touch radius for a reflected shot
+    puddleRadius: 60,       // px
+    puddleTime: 3.0,        // seconds a puddle lasts
+    puddleSlow: 0.5,        // Rip's top-speed multiple inside a puddle
+    reflectSpeed: 520,      // px/s a perfectly reflected arc flies back at the squid
+  },
+  phaseeel: {
+    radius: 14,
+    points: 40,
+    hiddenTime: 1.6,        // seconds hidden
+    rippleTime: 0.5,        // seconds of ripple telegraph before it surfaces
+    visibleTime: 1.2,       // seconds visible (it bites during this window)
+    placeMin: 180,          // px from Rip where it reappears at the start of each hidden phase
+    placeMax: 300,
+    biteSpeed: 280,         // px/s
+    stunTime: 0.8,          // a Pulse during the ripple stuns it this long; it stays visible meanwhile
+  },
+  warden: {
+    radius: 60,
+    points: 500,            // base points: a kill scores base x multiplier, like every other kill
+    hp: 14,                 // each dash that lands on the exposed body removes 1, at most once per dash
+    speed: 55,              // px/s advance in phase 1
+    phase2Speed: 90,        // px/s advance in phase 2
+    phase2Wave: 20,         // a Warden that spawns at this wave or later starts in phase 2
+    cycle: 3.0,             // phase 1 cycle: telegraph, then the weak point is exposed, then recover
+    telegraph: 1.0,         // seconds of telegraph (the snap lands at its end)
+    exposeTime: 0.6,        // seconds the weak point glows and can be dashed after each snap
+    phase2Cycle: 2.0,
+    phase2Telegraph: 0.8,
+    lureEvery: 6,           // seconds between lures, rounded to whole cycles
+    lureCount: 4,           // Drifters per lure
+    lureSpeed: 220,         // px/s the lure Drifters chase at
+    lureBonus: 50,          // flat points per lure Drifter killed while the Warden lives
+    lureRing: 70,           // px from the Warden's centre where lure Drifters appear
+    stunTime: 1.0,          // a perfect Pulse in the last 0.12 s of a telegraph stuns it this long
+  },
 };
 
 // Lone enemies and waves. A lone enemy (the last of its wave, with nothing else pending) turns aggressive
