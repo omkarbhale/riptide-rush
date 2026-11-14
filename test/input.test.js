@@ -11,8 +11,10 @@ import {
   padKeys,
   radialDeadZone,
   readPads,
+  stableAimDirection,
   stickDirections,
 } from '../src/input.js';
+import { CURSOR_DEAD_ZONE } from '../src/player-vis.js';
 import {
   TOUCH,
   createTouchState,
@@ -327,4 +329,35 @@ test('an unknown touch id is ignored', () => {
   t.move(99, 0, 0);
   t.up(99, 0, 0, 0);
   assert.deepEqual(t.drain(), []);
+});
+
+// ---- mouse aim dead zone (issue #131) ----------------------------------------------------------------
+
+test('mouse aim inside the dead zone keeps the last stable direction, whatever the jitter', () => {
+  const prev = { x: 0, y: 1 };
+  // The cursor wobbles left and right of the player, and each wobble is well inside 28 px.
+  for (const [dx, dy] of [[5, 0], [-5, 0], [0, -20], [12, 12], [0, 0], [NaN, 0]]) {
+    const s = stableAimDirection(prev, dx, dy);
+    assert.equal(s.held, true, `held for offset (${dx}, ${dy})`);
+    assert.equal(s.x, 0);
+    assert.equal(s.y, 1);
+  }
+});
+
+test('mouse aim releases to the cursor direction just outside the dead zone', () => {
+  const prev = { x: 0, y: 1 };
+  const outside = stableAimDirection(prev, CURSOR_DEAD_ZONE + 0.5, 0);
+  assert.equal(outside.held, false);
+  assert.ok(close(outside.x, 1) && close(outside.y, 0), 'the cursor direction, not the held one');
+  const diag = stableAimDirection(prev, -60, 80);
+  assert.equal(diag.held, false);
+  assert.ok(close(Math.hypot(diag.x, diag.y), 1, 1e-9), 'a unit vector');
+  assert.ok(close(diag.x, -0.6) && close(diag.y, 0.8));
+});
+
+test('the dead zone edge is inclusive at 28 px and the radius is a parameter', () => {
+  const prev = { x: 1, y: 0 };
+  assert.equal(stableAimDirection(prev, 0, CURSOR_DEAD_ZONE).held, true, 'exactly 28 px is still held');
+  assert.equal(stableAimDirection(prev, 0, CURSOR_DEAD_ZONE + 0.01).held, false);
+  assert.equal(stableAimDirection(prev, 0, 10, 5).held, false, 'a 5 px zone releases at 10 px');
 });
