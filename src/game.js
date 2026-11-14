@@ -13,6 +13,20 @@ import {
   SPAWN,
   ENEMY,
 } from './config.js';
+// PICKUPS: health recovery and modifier drops (#54). Hooks are marked below.
+import {
+  createPickupState,
+  onKill,
+  shockwaveVictims,
+  updatePickups,
+  absorbHit,
+  onHurt,
+  onWaveEnd,
+  dashMaxCharges,
+  dashRechargeScale,
+  dashDistanceScale,
+  comboDrainScale,
+} from './pickups.js';
 import { planWave, spawnQueue } from './waves.js';
 
 const W = LOGICAL_WIDTH;
@@ -353,6 +367,8 @@ export function createGame(seed = 1, options = {}) {
     kills: 0,
     burstKills: 0,   // kills credited to the current pulse's reflected bullets
     slowmo: 0,       // seconds of world slow-motion left
+    modifiers: {},   // PICKUPS: kind -> seconds remaining (see pickups.js)
+    pickups: createPickupState(), // PICKUPS
     nextId: 1,
     player: {
       x: W / 2,
@@ -421,9 +437,11 @@ export function update(game, input, dt) {
   if (input.pulse && p.pulseCooldown <= 0) firePulse(game);
   if (input.dash && !p.dash.active && !p.bounce && p.dash.charges >= 1) startDash(game, input);
 
-  if (p.dash.active) stepDash(game, dt);
+  const dashing = Boolean(p.dash.active);
+  if (dashing) stepDash(game, dt);
   else if (p.bounce) stepBounce(game, dt);
   else stepMove(game, input, dt);
+  updatePickups(game, dt, dashing); // PICKUPS: drops move, magnet, collection, modifier timers
 
   const aimX = input.aimX ?? p.x;
   const aimY = input.aimY ?? p.y;
@@ -458,7 +476,7 @@ function updateTier(game) {
 function tickCombo(game, dt) {
   const c = game.combo;
   if (c.count <= 0) return;
-  c.timer -= dt;
+  c.timer -= dt * comboDrainScale(game); // PICKUPS: Riptide Coal
   if (c.timer <= 0) {
     const lost = c.count;
     c.count = 0;
@@ -470,28 +488,31 @@ function tickCombo(game, dt) {
 
 function tickRecharge(game, dt) {
   const d = game.player.dash;
-  if (d.charges >= DASH.maxCharges) {
+  const max = dashMaxCharges(game); // PICKUPS: Spark Coral
+  if (d.charges >= max) {
     d.recharge = 0;
     return;
   }
-  d.recharge += dt;
-  while (d.recharge >= DASH.rechargeTime && d.charges < DASH.maxCharges) {
+  d.recharge += dt * dashRechargeScale(game); // PICKUPS: Frenzy
+  while (d.recharge >= DASH.rechargeTime && d.charges < max) {
     d.recharge -= DASH.rechargeTime;
     d.charges += 1;
   }
-  if (d.charges >= DASH.maxCharges) d.recharge = 0;
+  if (d.charges >= max) d.recharge = 0;
 }
 
 // Every kill: +1 combo, timer reset, score = base x multiplier (combo after this kill),
 // plus a multi-kill bonus for the 2nd+ kill of one slash, and an immediate dash charge refund.
 // `slashIndex` is 1-based: which kill this is within the current dash or pulse.
-// `cause` says how it died: 'dash', 'defuse' (a mine dashed through), 'reflect' or 'blast'.
+// `cause` says how it died: 'dash', 'defuse' (a mine dashed through), 'reflect', 'blast' or 'shockwave'.
 // The kill event carries `bonus` (the multi-kill points) and `hitStopMs` so feedback can scale.
+// Returns how many enemies died, counting Undertow chain kills, so callers can keep slashIndex in step.
 export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
-  if (!e.alive) return;
+  if (!e.alive) return 0;
   e.alive = false;
   const def = ENEMY_KINDS[e.kind];
   const c = game.combo;
+  const prevTier = c.tier; // PICKUPS
   c.count += 1;
   c.timer = comboWindowFor(c.count);
   const mult = multiplierFor(c.count);
@@ -500,7 +521,7 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
   game.score += points;
   game.kills += 1;
   const d = game.player.dash;
-  d.charges = Math.min(DASH.maxCharges, d.charges + 1);
+  d.charges = Math.min(dashMaxCharges(game), d.charges + 1); // PICKUPS: Spark Coral raises the cap
   updateTier(game);
   game.events.push({
     type: 'kill',
@@ -515,6 +536,11 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
     cause,
   });
   if (def.onDeath) def.onDeath(game, e);
+  // PICKUPS: drop roll, then the Undertow shockwave chain (victims die through killEnemy too).
+  onKill(game, e, c.tier > prevTier);
+  let kills = 1;
+  for (const v of shockwaveVictims(game, e)) kills += killEnemy(game, v, slashIndex + kills, 'shockwave');
+  return kills;
 }
 
 // ---- Dash -----------------------------------------------------------------------------------
@@ -542,18 +568,21 @@ function planDash(game, aimX, aimY) {
       nearest = { e, along, lateral: Math.abs(vx * dy - vy * dx) };
     }
   }
+  // PICKUPS: Frenzy lengthens every dash by the same factor, and the lunge window scales with it.
+  const scale = dashDistanceScale(game);
+  const baseDist = DASH.distance * scale;
   const assisted =
     nearest !== null &&
-    nearest.along > DASH.distance &&
-    nearest.along <= DASH.lungeMaxDistance &&
+    nearest.along > baseDist &&
+    nearest.along <= DASH.lungeMaxDistance * scale &&
     nearest.lateral <= nearest.e.r + DASH.bladeRadius;
-  const dist = assisted ? nearest.along : DASH.distance;
+  const dist = assisted ? nearest.along : baseDist;
   const [ex, ey] = clampToArena(p.x + dx * dist, p.y + dy * dist, PLAYER.radius);
   return {
     dirX: dx,
     dirY: dy,
     dist,
-    dur: DASH.duration * (dist / DASH.distance), // same speed, slightly longer when extended
+    dur: DASH.duration * (dist / DASH.distance), // same speed, slightly longer when extended (or under Frenzy)
     ex,
     ey,
     assisted,
@@ -655,8 +684,7 @@ function finalArc(game, d) {
     if (!e.alive) continue;
     if (!inFinalArc(d.ex, d.ey, d.dirX, d.dirY, e.x, e.y, DASH.finalArcRadius)) continue;
     if (dashVerdict(game, e, d, d.ex, d.ey) !== 'kill') continue;
-    d.kills += 1;
-    killEnemy(game, e, d.kills, e.kind === 'mine' ? 'defuse' : 'dash');
+    d.kills += killEnemy(game, e, d.kills + 1, e.kind === 'mine' ? 'defuse' : 'dash'); // PICKUPS: chain kills count
   }
   for (const b of game.bullets) {
     if (!b.alive || b.owner !== 'enemy') continue;
@@ -682,8 +710,7 @@ function sweepDash(game, d, x, y) {
         return; // d.lastX stays at the last clear point
       }
       if (verdict === 'kill') {
-        d.kills += 1;
-        killEnemy(game, e, d.kills, e.kind === 'mine' ? 'defuse' : 'dash');
+        d.kills += killEnemy(game, e, d.kills + 1, e.kind === 'mine' ? 'defuse' : 'dash'); // PICKUPS: chain kills count
       }
     } else if (!d.nearMiss && distToSegment(d.lastX, d.lastY, x, y, e.x, e.y) <= DASH.whiffRadius) {
       d.nearMiss = true;
@@ -963,19 +990,21 @@ function reflectedBulletsHitEnemies(game) {
       if (!e.alive) continue;
       if (segmentHitsCircle(b.px, b.py, b.x, b.y, e.x, e.y, e.r + b.r)) {
         b.alive = false;
-        game.burstKills += 1;
-        killEnemy(game, e, game.burstKills, 'reflect');
+        game.burstKills += killEnemy(game, e, game.burstKills + 1, 'reflect');
         break;
       }
     }
   }
 }
 
-// Returns true if the hit landed. Dashing and post-hit invulnerability block damage.
+// Returns true if the attack connected: HP was lost, or a Shield Scale absorbed it. Dash grace, post-hit
+// invulnerability and the shield's own bounce grace block the hit entirely and return false.
 export function damagePlayer(game, fromX, fromY) {
   const p = game.player;
-  if (game.over || p.invuln > 0 || p.dashGrace > 0 || p.dash.active) return false;
+  if (game.over || p.invuln > 0 || p.dashGrace > 0 || p.dash.active || game.pickups.shieldGrace > 0) return false; // PICKUPS: grace
+  if (absorbHit(game, fromX, fromY)) return true; // PICKUPS: the attack connects; a Shield Scale takes the damage
   p.hp -= 1;
+  onHurt(game); // PICKUPS: this wave is no longer flawless
   p.invuln = PLAYER.invulnAfterHit;
   const [dx, dy] = unit(p.x - fromX, p.y - fromY);
   p.vx += dx * PLAYER.hitKnockback;
@@ -1036,6 +1065,7 @@ function updateSpawner(game, dt) {
     game.warnings.some((wn) => wn.wave === w.number) ||
     game.enemies.some((e) => e.alive && e.wave === w.number);
   if (!pending) {
+    onWaveEnd(game); // PICKUPS: flawless wave heal
     game.events.push({ type: 'waveClear', wave: w.number });
     w.phase = 'breather';
     w.timer = SPAWN.breather;

@@ -23,6 +23,7 @@ import { FX_PRESETS, SHAKE_MAX_OFFSET } from './fx.js';
 import { COMBO, LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H } from './config.js';
 import { ENEMY_KINDS, multiplierFor, tierFor } from './game.js';
 import { PALETTE } from './art.js';
+import { PICKUP_KINDS } from './pickups.js'; // PICKUPS (#54): colours and labels for the pickup rows
 
 // Every event type src/game.js can emit. test/feedback.test.js checks a fuzzed run against this.
 export const GAME_EVENT_TYPES = Object.freeze([
@@ -35,7 +36,14 @@ export const GAME_EVENT_TYPES = Object.freeze([
   'comboLost',
   'hurt',
   'waveStart',
+  'waveClear',
   'gameOver',
+  // PICKUPS (#54): presentation for these lives in pickups-art.js; sounds are a follow-up.
+  'pickupDrop',
+  'pickup',
+  'modifierEnd',
+  'heal',
+  'shieldBreak',
   'bulletCut',
   'enemyShoot',
   'dashWhiff',
@@ -43,7 +51,6 @@ export const GAME_EVENT_TYPES = Object.freeze([
   'stagger',
   'mineArm',
   'mineExplode',
-  'waveClear',
 ]);
 
 const PAN_WIDTH = 0.8; // stereo pan at the arena edge; the centre is 0
@@ -121,6 +128,41 @@ export const PRESET_BURSTS = Object.freeze({
 // ---- the mapping table --------------------------------------------------------------------------
 // Matrix rows are cited inline. Values are the matrix's; the only deviation is noted where it occurs.
 export const FEEDBACK = Object.freeze({
+  // PICKUPS (#54). Sounds and presets are existing names; the pickup's own colour is passed through.
+  // A drop is a soft burst at the kill point. Nothing plays for the drop itself, so it stays quiet in a fight.
+  pickupDrop: {
+    preset: (ev) => ({ name: 'comboTierBloom', color: PICKUP_KINDS[ev.kind]?.color }),
+  },
+
+  // Collecting a pickup: chime, burst in its colour, a flash, and its name. Heal floaters come from pickups-art.js.
+  pickup: {
+    sound: (ev) => ({ name: 'comboTierUp', pitch: ev.kind === 'heal' ? 1.25 : 1, pan: panFor(ev.x) }),
+    preset: (ev) => ({ name: 'comboTierBloom', color: PICKUP_KINDS[ev.kind]?.color }),
+    flash: (ev) => [PICKUP_KINDS[ev.kind]?.color ?? '#ffffff', 0.1],
+    floater: (ev) => (ev.kind === 'heal' ? undefined : { text: PICKUP_KINDS[ev.kind]?.label ?? '', color: PICKUP_KINDS[ev.kind]?.color, life: 0.9, size: 20 }),
+  },
+
+  // A modifier running out: a soft tick, no burst.
+  modifierEnd: {
+    sound: () => ({ name: 'uiClick', pitch: 1, pan: 0 }),
+  },
+
+  // A heal: a green burst and a light shake. The +HP floater is drawn by pickups-art.js.
+  heal: {
+    sound: (ev) => ({ name: 'comboTierUp', pitch: 1.4, pan: panFor(ev.x) }),
+    preset: () => ({ name: 'comboTierBloom', color: PICKUP_KINDS.heal.color }),
+    shake: () => 2,
+    flash: () => [PICKUP_KINDS.heal.color, 0.12],
+  },
+
+  // The Shield Scale absorbs a hit: the reflect clang, a white flash and a small shake. The white ring is drawn by pickups-art.js.
+  shieldBreak: {
+    sound: (ev) => ({ name: 'reflect', pan: panFor(ev.x) }),
+    preset: () => ({ name: 'reflectSpark' }),
+    shake: () => 3,
+    flash: () => ['#ffffff', 0.12],
+  },
+
   // Dash start: whoosh, directional burst, white-hot flash. The trail runs per step in handleStep.
   dash: {
     sound: (ev) => ({ name: 'dash', pan: panFor(ev.x) }),

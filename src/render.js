@@ -4,6 +4,8 @@
 import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, PULSE, SPAWN, ENEMY, PLAYER, DASH, RESTART_GATE } from './config.js';
 import { multiplierFor, comboWindowFor, dashPreview } from './game.js';
 import { draw, PALETTE } from './art.js';
+import { dashMaxCharges } from './pickups.js'; // PICKUPS (#54)
+import { drawPickups, drawModifierHud } from './pickups-art.js'; // PICKUPS (#54)
 
 const FONT = '"Trebuchet MS", "Segoe UI", system-ui, sans-serif';
 const DIM = 'rgba(234, 255, 255, 0.6)';
@@ -271,6 +273,7 @@ function drawHud(ctx, game, highScore) {
     ctx.font = `600 15px ${FONT}`;
     ctx.fillText(`COMBO ${c.count}`, 28, 120);
   }
+  drawModifierHud(ctx, game); // PICKUPS (#54): active modifiers with countdown bars
 
   // Top right: wave and best.
   ctx.textAlign = 'right';
@@ -306,11 +309,12 @@ function drawHud(ctx, game, highScore) {
   // Bottom centre: dash charge pips. The pip being recharged fills as its timer runs.
   const d = game.player.dash;
   ctx.textAlign = 'center';
-  for (let i = 0; i < DASH.maxCharges; i++) {
-    const px = W / 2 - 52 + i * 52;
+  const maxCharges = dashMaxCharges(game); // PICKUPS (#54): 4 pips while Spark Coral is active
+  for (let i = 0; i < maxCharges; i++) {
+    const px = W / 2 - ((maxCharges - 1) * 52) / 2 + i * 52;
     const py = H - 42;
     const ready = i < d.charges;
-    const recharging = i === d.charges && d.charges < DASH.maxCharges;
+    const recharging = i === d.charges && d.charges < maxCharges;
     ctx.save();
     ctx.translate(px, py);
     ctx.rotate(Math.PI / 4);
@@ -449,6 +453,7 @@ export function drawFrame(ctx, view) {
     ctx.save();
     ctx.translate(shake.x, shake.y);
     drawWarnings(ctx, game, view.time);
+    drawPickups(ctx, game, view.alpha, view.time); // PICKUPS (#54): pickups, shield aura, pickup fx
     drawEnemies(ctx, game, view);
     drawBullets(ctx, game, view);
     drawDashFeedback(ctx, game);

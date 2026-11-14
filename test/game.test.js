@@ -640,6 +640,8 @@ test('same seed and same inputs give identical state', () => {
 const KNOWN = new Set([
   'kill', 'dash', 'hurt', 'pulse', 'reflect', 'perfectPulse', 'comboTier', 'comboLost', 'waveStart', 'waveClear',
   'gameOver', 'deflect', 'stagger', 'mineArm', 'mineExplode', 'bulletCut', 'enemyShoot', 'dashWhiff',
+  // PICKUPS (#54): health recovery and modifier drop events.
+  'pickupDrop', 'pickup', 'modifierEnd', 'heal', 'shieldBreak',
 ]);
 
 const finite = (g) => {
@@ -843,6 +845,7 @@ test('exit grace is refreshed to 0.25 s by a dash that kills', () => {
   const g = quiet();
   place(g, 300, H / 2);
   freeze(spawnEnemy(g, 'drifter', 400, H / 2));
+  g.rng = () => 0.99; // PICKUPS: a kill can roll a drop, which the dash would collect; this test is about grace only
   update(g, dashAt(900, H / 2), SIM_DT);
   steps(g, 14);
   assert.equal(g.kills, 1);
