@@ -1,7 +1,7 @@
 // Mode UI: the title-screen mode picker, the small mode label during play, and the daily share prompt on the
 // game-over card. Drawn after the HUD layer (render.js), in window pixels, scaled like the HUD. Clicks are
 // hit-tested here too (main.js asks modesHit before it queues an action), so a click on a button never starts
-// a run. Only copyText and the fallback field touch the DOM, and only when called.
+// a run. Only copyText, the fallback field and the screen-reader live region touch the DOM, and only when called.
 import { PALETTE } from './art.js';
 import { MODES, MODE_IDS, dailyMutator, dailySeed, formatScore } from './modes.js';
 
@@ -262,8 +262,52 @@ export async function copyText(value) {
   return 'fallback';
 }
 
+// ---- screen-reader live region (#140) ------------------------------------------------------------
+// index.html has one element with id "sr-status" (role status). It says what the screen is right now. It is
+// written only when the announcement changes, so a screen reader hears each screen once, not every frame.
+let lastLive = null;
+
+// What the live region should say for a screen. Pure, so it runs under node --test.
+export function liveAnnouncement(view) {
+  const modes = view?.modes;
+  const modeName = modes && MODES[modes.mode] ? MODES[modes.mode].name : '';
+  switch (view?.screen) {
+    case 'title':
+      return `Riptide Rush. Title. Mode: ${modeName}. Keys 1 to 4 or Left and Right choose a mode. Click or press Space to dive in.`;
+    case 'howto':
+      return 'How to play. Press Space or Enter to go on. Escape skips.';
+    case 'playing':
+      return `Playing ${modeName}.`;
+    case 'paused':
+      return `Paused. ${modeName}. Press P or Escape to resume.`;
+    case 'over':
+      return `Game over. ${modeName}. Score ${formatScore(view.game?.score ?? 0)}. Click, Space or R to dive again.`;
+    default:
+      return '';
+  }
+}
+
+// Writes text into the live region. A missing element or a blocked DOM does nothing.
+export function setLiveText(text) {
+  try {
+    if (typeof document === 'undefined') return;
+    const el = document.getElementById('sr-status');
+    if (el) el.textContent = text;
+  } catch {
+    // no DOM: nothing to announce to
+  }
+}
+
+function syncLiveRegion(view) {
+  const text = liveAnnouncement(view);
+  if (text === '' || text === lastLive) return;
+  lastLive = text;
+  setLiveText(text);
+}
+
 // Draws the mode UI for this frame. view.modes carries the mode state (see main.js modesView).
 export function drawModesLayer(ctx, L, view) {
+  syncLiveRegion(view);
   const modes = view.modes;
   if (!modes) return;
   ctx.save();
