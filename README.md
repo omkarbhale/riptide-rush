@@ -8,14 +8,20 @@ Design and architecture live in the [game design issue](https://github.com/omkar
 
 ## Controls
 
-| Action | Keyboard | Mouse |
-| --- | --- | --- |
-| Swim | WASD / arrow keys | |
-| Aim | | Move the mouse |
-| Dash-slash toward the cursor | Space | Left click |
-| Pulse: reflect bullets, stagger enemies | Shift | Right click |
-| Pause / resume | Esc or P | Click on the pause screen |
-| Start / restart | Space, Enter or R | Click |
+| Action | Keyboard | Mouse | Touch | Gamepad |
+| --- | --- | --- | --- | --- |
+| Swim | WASD / arrow keys | | Left thumb: floating stick | Left stick |
+| Aim | | Move the mouse | Right thumb: drag to aim | Right stick |
+| Dash-slash toward the aim | Space | Left click | Release the right thumb (a quick tap dashes along the last aim) | A or right trigger |
+| Pulse: reflect bullets, stagger enemies | Shift | Right click | PULSE button (bottom right) | B or left trigger |
+| Pause / resume | Esc or P | Click on the pause screen | Pause button (top right) | Start |
+| Start / restart | Space, Enter or R | Click | Tap | A |
+| Menu: move / choose | Arrows, Enter | | Tap on the pause screen | D-pad or left stick, X |
+| Fullscreen | F | Corner button | Corner button (top left) | |
+
+Touch controls appear only on touch-first devices and never scroll or zoom the page. The stick and the aim
+both use dead zones on the gamepad, and a pad can be plugged in or pulled out at any time.
+Touch and gamepad aim are a direction from Rip, so the dash goes the way the thumb or stick points.
 
 Dash has 3 charges, each recharging in 0.9 s; every kill refunds one. Pulse has a 2.5 s cooldown.
 A pulse that reflects a bullet within 0.12 s of impact is a *perfect pulse*: brief slow-motion and a reset cooldown.
@@ -55,5 +61,7 @@ window, wave escalation, determinism, and a 60-simulated-second soak with random
 - `src/main.js`: boot, fixed 120 Hz loop with interpolated render, screens, sim-event to effect bridge.
 - `src/game.js`: pure simulation (no DOM). `createGame(seed)`, `update(game, input, dt)`, and the `game.events` queue.
 - `src/config.js`: every tuning number as a named constant.
-- `src/input.js`: keyboard and mouse to actions, aim in logical coordinates, 120 ms action buffer.
+- `src/input.js`: keyboard, mouse, gamepad and touch to actions and one input snapshot; dead zones; 120 ms action buffer.
+- `src/touch.js`: touch gesture state (stick, aim drag, taps, buttons) and the on-screen overlay, mounted only on touch-first devices.
+- `assets/`: SVG favicon and the social preview image.
 - `src/render.js`: placeholder shapes, HUD and menus in the design palette.
