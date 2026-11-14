@@ -97,6 +97,8 @@ function headingOf(e, dt) {
 
 // Telegraph progress 0..1 for kinds that have a telegraph in config (Charger today).
 function telegraphOf(e) {
+  // A spitter's wind-up rises 0 to 1 over its own timer (the sim exposes it as e.telegraph).
+  if (e.kind === 'spitter') return e.state === 'windup' ? clamp01(e.telegraph) : 0;
   const dur = ENEMY[e.kind]?.telegraph;
   if (!dur || e.state !== 'telegraph') return 0;
   return clamp01(1 - e.stateT / dur);
@@ -116,7 +118,7 @@ function popScale(e) {
 // A long dashed line along the locked lunge, so the danger reads from across the arena.
 function drawAimLine(ctx, e, x, y, tg, t) {
   const def = ENEMY[e.kind];
-  const len = (def?.lungeSpeed ?? 0) * (def?.lungeTime ?? 0);
+  const len = def?.aimLength ?? (def?.lungeSpeed ?? 0) * (def?.lungeTime ?? 0);
   if (len <= 0 || !(e.dirX || e.dirY)) return;
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
@@ -170,14 +172,18 @@ function drawBullets(ctx, game, view) {
 function drawDashFeedback(ctx, game) {
   const p = game.player;
   if (p.dashGrace > 0 && !p.dash.active) {
+    // Afterglow: a white-hot halo that fades and widens over the grace, so the safe window reads on screen.
+    const k = p.dashGrace / DASH.killGrace; // 1 at the dash end (or the kill), 0 when the grace is over
     ctx.save();
-    ctx.globalAlpha = 0.5 * (p.dashGrace / DASH.killGrace);
-    ctx.fillStyle = PALETTE.dash;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.6 * k;
+    ctx.strokeStyle = PALETTE.dash;
     ctx.shadowColor = PALETTE.dash;
-    ctx.shadowBlur = 18;
+    ctx.shadowBlur = 24;
+    ctx.lineWidth = 3 + 4 * (1 - k);
     ctx.beginPath();
-    ctx.arc(p.x, p.y, PLAYER.radius * 1.4, 0, TAU);
-    ctx.fill();
+    ctx.arc(p.x, p.y, PLAYER.radius * (1.6 + 1.0 * (1 - k)), 0, TAU);
+    ctx.stroke();
     ctx.restore();
   }
   if (p.dash.active || p.dash.charges < 1 || game.over) return;

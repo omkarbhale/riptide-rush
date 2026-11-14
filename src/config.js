@@ -94,6 +94,7 @@ export const ENEMY = {
     fireInterval: 2.2,  // seconds between shots
     firstShotDelay: 1.2,
     windup: 0.35,       // seconds of visible aim line before a shot is released (aim locks at wind-up start)
+    aimLength: 300,     // px of the wind-up aim line drawn along the locked direction
     postDashQuiet: 0.15, // no wind-up starts during a dash or this long after one (it simply waits)
     bulletSpeed: 240,   // px/s
     bulletRadius: 6,
