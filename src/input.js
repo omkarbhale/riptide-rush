@@ -1,6 +1,9 @@
-// DOM adapter: keyboard and mouse become named actions plus a logical-space aim point.
+// DOM adapter: keyboard, mouse, touch and gamepad become named actions plus one plain input snapshot,
+// { moveX, moveY, aimX, aimY, dash, pulse }, which is the only thing the simulation reads.
 // Importing this module touches no DOM; only createInput() attaches listeners.
 import { LOGICAL_WIDTH, LOGICAL_HEIGHT, INPUT_BUFFER } from './config.js';
+import { createTouchState, isTouchDevice, mountTouchControls, unitVector } from './touch.js';
+import { CURSOR_DEAD_ZONE, aimPresence } from './player-vis.js';
 
 const MOVE_KEYS = {
   KeyW: [0, -1],
@@ -38,9 +41,116 @@ const MOUSE_ACTIONS = {
   2: ['pulse', 'confirm'],
 };
 
+// Gamepad, on the standard mapping. Keys are button indices ('b0' is A) or stick directions ('ls-up').
+// Right stick is aim, left stick is move, and the left stick also steps through menus like the d-pad.
+export const PAD_ACTIONS = {
+  b0: ['dash', 'confirm'],  // A
+  b1: ['pulse'],            // B
+  b2: ['select'],           // X: the Enter of the pad, for the pause options
+  b6: ['pulse'],            // left trigger
+  b7: ['dash'],             // right trigger
+  b9: ['pause'],            // Start
+  b12: ['up'],
+  b13: ['down'],
+  b14: ['left'],
+  b15: ['right'],
+  'ls-up': ['up'],
+  'ls-down': ['down'],
+  'ls-left': ['left'],
+  'ls-right': ['right'],
+};
+const PAD_TRIGGERS = new Set([6, 7]);
+const PAD_TRIGGER_THRESHOLD = 0.5;
+
 const PREVENT_DEFAULT = new Set([...Object.keys(MOVE_KEYS), ...Object.keys(KEY_ACTIONS)]);
 
+export const STICK_DEAD_ZONE = 0.18;  // left stick: radial dead zone, fraction of full deflection
+export const AIM_DEAD_ZONE = 0.22;    // right stick
+export const STICK_MENU_THRESHOLD = 0.6; // left stick past this on one axis counts as a menu step
+// Touch and gamepad aim are a direction from the player. The aim point sits this far out along it.
+// Only the direction reaches the sim (dash and facing use unit vectors), so this is just the aim preview's reach.
+export const AIM_RANGE = 200;
+
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+// Radial dead zone: inside `deadZone` the stick reads zero; outside it, the magnitude rescales from 0 at the
+// edge to 1 at full deflection and the direction is kept (so diagonals do not square off).
+export function radialDeadZone(x, y, deadZone) {
+  const m = Math.hypot(x, y);
+  if (!(m > deadZone)) return { x: 0, y: 0 };
+  const k = Math.min(1, (m - deadZone) / (1 - deadZone)) / m;
+  return { x: x * k, y: y * k };
+}
+
+// The aim point `range` px from `origin` along the unit direction `dir`.
+export function aimPoint(origin, dir, range = AIM_RANGE) {
+  return { x: origin.x + dir.x * range, y: origin.y + dir.y * range };
+}
+
+// Mouse aim by direction. `dx, dy` is the cursor's offset from the player and `prev` the last stable direction
+// (a unit vector). Within `deadZone` px the offset's direction is mostly jitter, so `prev` is kept and `held` is
+// true. Outside it the cursor's own unit direction is used. Pure: the dash itself reads its own action buffer,
+// so this never delays or blocks it.
+export function stableAimDirection(prev, dx, dy, deadZone = CURSOR_DEAD_ZONE) {
+  const m = Math.hypot(dx, dy);
+  if (!(m > deadZone)) return { x: prev.x, y: prev.y, held: true };
+  return { x: dx / m, y: dy / m, held: false };
+}
+
+// The four menu directions a stick vector is past. A stick pushed up pins 'up' as long as it is held there.
+export function stickDirections(x, y, threshold = STICK_MENU_THRESHOLD) {
+  const dirs = [];
+  if (y < -threshold) dirs.push('up');
+  if (y > threshold) dirs.push('down');
+  if (x < -threshold) dirs.push('left');
+  if (x > threshold) dirs.push('right');
+  return dirs;
+}
+
+// The keys held down on one gamepad. `left` is its dead-zoned left stick, read once by the caller.
+export function padKeys(pad, left) {
+  const keys = new Set();
+  const buttons = pad.buttons ?? [];
+  buttons.forEach((b, i) => {
+    if (!b) return;
+    const on = PAD_TRIGGERS.has(i) ? b.value > PAD_TRIGGER_THRESHOLD : !!b.pressed;
+    if (on) keys.add(`b${i}`);
+  });
+  for (const d of stickDirections(left.x, left.y)) keys.add(`ls-${d}`);
+  return keys;
+}
+
+// Actions for keys that are held now but were not held last poll. Held keys do not repeat.
+export function padEdges(prev, now) {
+  const actions = [];
+  for (const key of now) {
+    if (!prev.has(key) && PAD_ACTIONS[key]) actions.push(...PAD_ACTIONS[key]);
+  }
+  return actions;
+}
+
+// One read of every connected gamepad. Sticks are summed across pads and clamped; the first pad whose right
+// stick is past its dead zone sets the aim direction. Disconnected or missing pads (hot-plug) are skipped.
+export function readPads(pads) {
+  const move = { x: 0, y: 0 };
+  let aim = null;
+  const keys = new Set();
+  for (const pad of pads) {
+    if (!pad || pad.connected === false) continue;
+    const axes = pad.axes ?? [];
+    const left = radialDeadZone(axes[0] ?? 0, axes[1] ?? 0, STICK_DEAD_ZONE);
+    move.x += left.x;
+    move.y += left.y;
+    if (!aim) {
+      const right = radialDeadZone(axes[2] ?? 0, axes[3] ?? 0, AIM_DEAD_ZONE);
+      aim = unitVector(right.x, right.y);
+    }
+    for (const k of padKeys(pad, left)) keys.add(k);
+  }
+  move.x = clamp(move.x, -1, 1);
+  move.y = clamp(move.y, -1, 1);
+  return { move, aim, keys };
+}
 
 // Buffers an action press for `windowSeconds` of simulation time, so a press just before a
 // charge is ready still fires once it is. Time only moves when tick() is called.
@@ -72,11 +182,17 @@ export function createActionBuffer(windowSeconds = INPUT_BUFFER) {
 // options.mapPoint(clientX, clientY) -> { x, y } in logical arena space. Defaults to the canvas rectangle,
 // which is right only when the canvas is the arena; main.js passes the letterbox mapping.
 // options.claimPointer(button, clientX, clientY) -> true when a menu took the click, so no action is queued.
+// options.playerPosition() -> { x, y } of the player in logical space. Touch, gamepad and mouse aim are all
+// directions from the player. Without the option, render.js's last-frame player position is used (aimPresence),
+// so the aim never falls back to the arena centre. Before the first frame it is the centre.
+// options.touch: true to mount the touch overlay. Defaults to on for touch-first devices only.
 export function createInput(canvas, options = {}) {
   const held = new Set();
   const edges = [];
   const buffer = createActionBuffer();
-  const aim = { x: LOGICAL_WIDTH / 2, y: LOGICAL_HEIGHT / 2 };
+  const aim = { x: LOGICAL_WIDTH / 2, y: LOGICAL_HEIGHT / 2 }; // mouse aim, absolute logical point
+  aimPresence.cursor = aim; // render.js draws the crosshair at the real cursor
+  let stableDir = { x: 1, y: 0 }; // mouse: the last stable aim direction (see stableAimDirection)
   const mapPoint =
     options.mapPoint ??
     ((clientX, clientY) => {
@@ -87,6 +203,28 @@ export function createInput(canvas, options = {}) {
       };
     });
   const claimPointer = options.claimPointer ?? (() => false);
+  const playerPosition = options.playerPosition ?? (() => aimPresence.player);
+  const centre = () => ({ x: LOGICAL_WIDTH / 2, y: LOGICAL_HEIGHT / 2 });
+  const origin = () => playerPosition() ?? centre();
+
+  // Relative aim (touch and gamepad): a unit direction from the player. aimSource says which aim the
+  // snapshot uses. 'mouse' is the absolute desktop aim and the default; touch-first devices start 'relative'.
+  const touchState = createTouchState();
+  const useTouch = options.touch ?? isTouchDevice(window);
+  let aimSource = useTouch ? 'relative' : 'mouse';
+  const relDir = { x: 1, y: 0 };
+  let relExplicit = false; // false until a thumb or stick aims: until then, facing follows movement
+  const setRelDir = (v) => {
+    relDir.x = v.x;
+    relDir.y = v.y;
+  };
+  const touchLayer = useTouch ? mountTouchControls(window, touchState) : null;
+
+  const getPads = () =>
+    typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function'
+      ? Array.from(navigator.getGamepads() ?? [])
+      : [];
+  let padPrev = new Set();
 
   const onKeyDown = (e) => {
     if (PREVENT_DEFAULT.has(e.code)) e.preventDefault();
@@ -101,15 +239,23 @@ export function createInput(canvas, options = {}) {
   };
   const onMouseMove = (e) => {
     Object.assign(aim, mapPoint(e.clientX, e.clientY));
+    aimSource = 'mouse';
+    if (!useTouch) aimPresence.mouseSeen = true;
   };
   const onMouseDown = (e) => {
     Object.assign(aim, mapPoint(e.clientX, e.clientY));
+    aimSource = 'mouse';
+    if (!useTouch) aimPresence.mouseSeen = true;
     if (claimPointer(e.button, e.clientX, e.clientY)) return;
     const actions = MOUSE_ACTIONS[e.button];
     if (!actions) return;
     edges.push(...actions);
   };
   const onContextMenu = (e) => e.preventDefault();
+  // A pad that is plugged in or pulled out must not fire the buttons already held. Re-read the held set.
+  const onPadChange = () => {
+    padPrev = readPads(getPads()).keys;
+  };
 
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
@@ -117,10 +263,17 @@ export function createInput(canvas, options = {}) {
   window.addEventListener('mousemove', onMouseMove);
   canvas.addEventListener('mousedown', onMouseDown);
   canvas.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('gamepadconnected', onPadChange);
+  window.addEventListener('gamepaddisconnected', onPadChange);
+  padPrev = readPads(getPads()).keys;
 
   return {
     // Actions pressed since the last drain, in order. Drain once per simulation step.
     drain() {
+      const pads = readPads(getPads());
+      edges.push(...padEdges(padPrev, pads.keys));
+      padPrev = pads.keys;
+      edges.push(...touchState.drain());
       return edges.splice(0, edges.length);
     },
     press(action) {
@@ -148,11 +301,50 @@ export function createInput(canvas, options = {}) {
           my += m[1];
         }
       }
+      const pads = readPads(getPads());
+      const t = touchState.read();
+      mx = clamp(mx + pads.move.x + t.move.x, -1, 1);
+      my = clamp(my + pads.move.y + t.move.y, -1, 1);
+
+      if (t.aimActive && t.aimDir) {
+        setRelDir(t.aimDir);
+        relExplicit = true;
+        aimSource = 'relative';
+      }
+      if (pads.aim) {
+        setRelDir(pads.aim);
+        relExplicit = true;
+        aimSource = 'relative';
+      }
+      if (!relExplicit) {
+        const dir = unitVector(mx, my);
+        if (dir) setRelDir(dir);
+      }
+
+      let aimX = aim.x;
+      let aimY = aim.y;
+      if (aimSource === 'relative') {
+        const p = aimPoint(origin(), relDir);
+        aimX = p.x;
+        aimY = p.y;
+      } else {
+        // Mouse: outside the dead zone the absolute cursor point is sent, as before. Inside it the last stable
+        // direction is sent from the player, so jitter near the player does not swing the aim.
+        const o = origin();
+        const s = stableAimDirection(stableDir, aim.x - o.x, aim.y - o.y);
+        stableDir = { x: s.x, y: s.y };
+        if (s.held) {
+          const p = aimPoint(o, stableDir);
+          aimX = p.x;
+          aimY = p.y;
+        }
+      }
+      aimPresence.source = aimSource;
       return {
-        moveX: clamp(mx, -1, 1),
-        moveY: clamp(my, -1, 1),
-        aimX: aim.x,
-        aimY: aim.y,
+        moveX: mx,
+        moveY: my,
+        aimX,
+        aimY,
         dash: buffer.has('dash'),
         pulse: buffer.has('pulse'),
       };
@@ -164,6 +356,9 @@ export function createInput(canvas, options = {}) {
       window.removeEventListener('mousemove', onMouseMove);
       canvas.removeEventListener('mousedown', onMouseDown);
       canvas.removeEventListener('contextmenu', onContextMenu);
+      window.removeEventListener('gamepadconnected', onPadChange);
+      window.removeEventListener('gamepaddisconnected', onPadChange);
+      touchLayer?.dispose();
     },
   };
 }

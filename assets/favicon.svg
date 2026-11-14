@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#050a18"/>
+  <!-- dash streak behind the blade -->
+  <path d="M4 33 L22 31 M4 37 L18 36" stroke="#3cf2ff" stroke-width="2.5" stroke-linecap="round" opacity="0.45"/>
+  <!-- the blade-fish: a cyan arrowhead with a white-hot core -->
+  <path d="M14 32 L50 22 L56 32 L50 42 Z" fill="#3cf2ff"/>
+  <path d="M26 32 L50 26 L53 32 L50 38 Z" fill="#eaffff"/>
+</svg>
