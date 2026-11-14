@@ -107,6 +107,27 @@ test('bullet and reflected bullet draw without throwing', () => {
   }
 });
 
+test('a bullet draws a trail only when its velocity is given', () => {
+  const plain = mockCtx();
+  draw.bullet(plain.ctx, 50, 60, 0.5, {});
+  const moving = mockCtx();
+  draw.bullet(moving.ctx, 50, 60, 0.5, { vx: 200, vy: 0 });
+  assert.ok(moving.counts.ops > plain.counts.ops, 'velocity adds trail draw ops');
+  const still = mockCtx();
+  draw.bullet(still.ctx, 50, 60, 0.5, { vx: 0.2, vy: 0 });
+  assert.equal(still.counts.ops, plain.counts.ops, 'a near-zero velocity draws no trail');
+});
+
+// Under Node the live fallback path runs (no offscreen canvas), which issues more ops than the
+// cached sprite path in a browser. This bound catches a regression in the fallback.
+test('an enemy costs a bounded number of draw ops, so 200 stay cheap', () => {
+  for (const type of ENEMY_TYPES) {
+    const { ctx, counts } = mockCtx();
+    draw.enemy(ctx, type, 100, 100, 0.7, 1.234, { flash: 0.6, telegraph: 0.5 });
+    assert.ok(counts.ops <= 60, `${type} issued ${counts.ops} ops`);
+  }
+});
+
 test('pulse draws at any radius and is a no-op when fully transparent', () => {
   for (const r of [0, 1, 30, 110, 200]) {
     const { ctx } = mockCtx();
