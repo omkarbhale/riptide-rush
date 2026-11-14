@@ -373,6 +373,11 @@ function zoomNow(game, screen, dt) {
   return zoom;
 }
 
+// The zoom in effect now (1 normally). main.js inverts it when mapping pointer positions to the arena.
+export function currentZoom() {
+  return zoom;
+}
+
 // The letterbox bands around the arena: the same deep-sea gradient, drawn in window pixels. Only the strips
 // outside the arena are filled, and nothing at all when the arena fills the window.
 let bandGradient = null;

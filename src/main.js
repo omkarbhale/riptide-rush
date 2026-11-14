@@ -1,10 +1,10 @@
 // Boot, fixed-timestep loop, screen state machine, and the wiring between the sim, the effects layer,
 // the sound layer and the renderer. Sim events go to feedback.js and hud.js; this file only handles state
 // changes, input routing and the saved options.
-import { SIM_DT, MAX_FRAME_DT, HIGH_SCORE_KEY, RESTART_GATE } from './config.js';
+import { SIM_DT, MAX_FRAME_DT, HIGH_SCORE_KEY, RESTART_GATE, LOGICAL_WIDTH, LOGICAL_HEIGHT } from './config.js';
 import { createGame, update, drainEvents } from './game.js';
 import { createInput } from './input.js';
-import { drawFrame } from './render.js';
+import { drawFrame, currentZoom } from './render.js';
 import { createFx, FX_QUALITY_BURST_SCALE } from './fx.js';
 import { audio } from './audio.js';
 import { createFeedback } from './feedback.js';
@@ -108,10 +108,17 @@ function cssPoint(clientX, clientY) {
   return { x: clientX - r.left, y: clientY - r.top };
 }
 
+// The arena is drawn about its centre at the combo zoom (see render.js), so the inverse includes it.
 function mapPoint(clientX, clientY) {
   const p = cssPoint(clientX, clientY);
   const L = app.layout;
-  return { x: (p.x - L.px) / L.s, y: (p.y - L.py) / L.s };
+  const z = currentZoom();
+  const cx = LOGICAL_WIDTH / 2;
+  const cy = LOGICAL_HEIGHT / 2;
+  return {
+    x: cx + (p.x - L.px - L.s * cx) / (z * L.s),
+    y: cy + (p.y - L.py - L.s * cy) / (z * L.s),
+  };
 }
 
 // A left click inside the pause options panel is handled here and never resumes the game. A click
