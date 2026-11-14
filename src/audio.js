@@ -366,13 +366,26 @@ const SYNTHS = {
 };
 
 // ---------------------------------------------------------------- output chain
+// Static soft limiter: transparent below LIMIT_KNEE, then bends smoothly toward a ceiling
+// of about 0.94 (never above 1.0). A DynamicsCompressorNode was tried first, but its envelope
+// follower cut 0.1 s transients by about 16 dB even below threshold, so output levels were
+// unpredictable. A static curve keeps every sound's measured level what the synth set.
+const LIMIT_KNEE = 0.75;
+function limiterCurve(n = 4096) {
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    const a = Math.abs(x);
+    const y = a <= LIMIT_KNEE ? a : LIMIT_KNEE + (1 - LIMIT_KNEE) * Math.tanh((a - LIMIT_KNEE) / (1 - LIMIT_KNEE));
+    curve[i] = x < 0 ? -y : y;
+  }
+  return curve;
+}
+
 function buildOutputChain(ctx) {
-  const limiter = ctx.createDynamicsCompressor();
-  limiter.threshold.value = -4;
-  limiter.knee.value = 0;
-  limiter.ratio.value = 20;
-  limiter.attack.value = 0.001;
-  limiter.release.value = 0.1;
+  const limiter = ctx.createWaveShaper();
+  limiter.curve = limiterCurve();
+  limiter.oversample = '4x';
   const master = ctx.createGain();
   master.gain.value = MASTER_LEVEL;
   limiter.connect(master);
