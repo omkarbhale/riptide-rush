@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, SPAWN, ARENA } from '../src/config.js';
-import { createGame } from '../src/game.js';
+import { createGame, spawnEnemy } from '../src/game.js';
 import { createFx } from '../src/fx.js';
 import { drawFrame } from '../src/render.js';
 import {
@@ -14,6 +14,9 @@ import {
   SETTINGS_KEY,
   activateSetting,
   blinkAlpha,
+  bossBarBox,
+  bossOf,
+  drawBossBar,
   clampOutOfRects,
   computeLayout,
   coveredBlocks,
@@ -720,3 +723,61 @@ test('run summary: every stat and table line sits inside its own panel, at each 
     }
   }
 });
+
+// ---- boss health bar (#129) -------------------------------------------------------------------------
+
+function gameWithWarden(hp = 14) {
+  const game = createGame(3);
+  game.enemies = [];
+  const w = spawnEnemy(game, 'warden', W / 2, H / 2, 10);
+  w.hp = hp;
+  return { game, w };
+}
+
+test('boss bar: sits clear of the score and wave panels, and inside the window, at each checked size and modifier count', () => {
+  for (const [w, h] of [...SIZES, [1280, 720]]) {
+    for (const mods of [0, 1, 2]) {
+      const L = computeLayout(w, h);
+      const box = bossBarBox(L, mods);
+      const panels = hudBoxes(L, mods);
+      assert.ok(box.x >= 0 && box.y >= 0 && box.x + box.w <= w && box.y + box.h <= h, `${w}x${h}: inside the window`);
+      for (const name of ['score', 'wave']) {
+        const p = panels[name];
+        const clear = box.x >= p.x + p.w || box.x + box.w <= p.x || box.y >= p.y + p.h || box.y + box.h <= p.y;
+        assert.ok(clear, `${w}x${h} mods ${mods}: the bar covers the ${name} panel`);
+      }
+    }
+  }
+});
+
+test('boss bar: draws only while the Warden lives, and reads DEFEATED for a moment after it falls', () => {
+  const L = computeLayout(1280, 720);
+  const { game } = gameWithWarden();
+  const hud = createHud();
+  let { ctx } = stubCtx(1280, 720);
+  hudUpdate(hud, 1 / 60, game, L);
+  assert.equal(drawBossBar(ctx, L, game, hud), true);
+  game.enemies = [];
+  hudUpdate(hud, 1 / 60, game, L);
+  assert.equal(bossOf(game), null);
+  ({ ctx } = stubCtx(1280, 720));
+  assert.equal(drawBossBar(ctx, L, game, hud), true, 'the DEFEATED beat draws');
+  hudUpdate(hud, 5, game, L);
+  ({ ctx } = stubCtx(1280, 720));
+  assert.equal(drawBossBar(ctx, L, game, hud), false, 'and then it is gone');
+});
+
+test('boss bar: a lost hit point flashes the bar, and the ghost of lost hit points falls to the live count', () => {
+  const L = computeLayout(1280, 720);
+  const { game, w } = gameWithWarden(14);
+  const hud = createHud();
+  hudUpdate(hud, 1 / 60, game, L);
+  assert.equal(hud.boss.flashT, 0);
+  w.hp = 13;
+  hudUpdate(hud, 0.05, game, L);
+  assert.ok(hud.boss.flashT > 0, 'the bar flashes on the hit');
+  assert.ok(hud.boss.shown > 13 && hud.boss.shown < 14, 'the ghost lags behind the live count');
+  for (let i = 0; i < 200; i++) hudUpdate(hud, 1 / 60, game, L);
+  assert.ok(Math.abs(hud.boss.shown - 13) < 1e-3, 'the ghost settles on the live count');
+});
+
