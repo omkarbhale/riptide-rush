@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Riptide Rush · Soundboard</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #050a18; color: #dfe9ff; font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; color: #3cf2ff; margin: 8px 0 4px; }
+  h2 { font-size: 15px; color: #ffe066; margin: 18px 0 8px; }
+  p.lede { margin: 0 0 12px; color: #8fa6cf; }
+  .panel { background: #0a1830; border: 1px solid #17305a; border-radius: 10px; padding: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  label { display: flex; gap: 8px; align-items: center; color: #8fa6cf; }
+  output { min-width: 3.2em; color: #dfe9ff; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 170px; accent-color: #3cf2ff; }
+  button { background: #102244; color: #dfe9ff; border: 1px solid #2a4f8a; border-radius: 8px; padding: 8px 12px; cursor: pointer; font: inherit; }
+  button:hover { border-color: #3cf2ff; }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: #0f3a4a; border-color: #3cf2ff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .grid button { text-align: left; font-variant-numeric: tabular-nums; }
+  canvas { width: 100%; height: auto; display: block; border-radius: 8px; background: #050a18; border: 1px solid #17305a; }
+  #status, #analyseStatus { color: #8fa6cf; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #17305a; vertical-align: top; }
+  th { color: #8fa6cf; font-weight: 600; }
+  td.num { text-align: right; white-space: nowrap; }
+  .ok { color: #5dff9b; }
+  .bad { color: #ff3d81; }
+  .scroll { overflow-x: auto; }
+  pre { white-space: pre-wrap; background: #050a18; padding: 10px; border-radius: 8px; border: 1px solid #17305a; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Riptide Rush · Soundboard</h1>
+  <p class="lede">Every sound is synthesized live with Web Audio (no files). Browsers need a click before audio can start.</p>
+  <p id="status">Audio not started.</p>
+
+  <section class="panel row">
+    <button id="enable" class="primary">Enable audio</button>
+    <label>Pitch <input id="pitch" type="range" min="0.5" max="2" step="0.01" value="1"><output id="pitchOut"></output></label>
+    <label>Volume <input id="volume" type="range" min="0" max="1" step="0.01" value="0.8"><output id="volumeOut"></output></label>
+    <label>Pan <input id="pan" type="range" min="-1" max="1" step="0.05" value="0"><output id="panOut"></output></label>
+  </section>
+
+  <h2>Sound effects</h2>
+  <section class="panel">
+    <div class="row" style="margin-bottom: 10px;">
+      <button id="combo" class="primary">Play 20 kills as a rising combo</button>
+      <button id="burst">30 kills in one second</button>
+    </div>
+    <div id="grid" class="grid"></div>
+  </section>
+
+  <h2>Adaptive music</h2>
+  <section class="panel row">
+    <button id="musicStart" class="primary">Start music</button>
+    <button id="musicStop">Stop music</button>
+    <label>Intensity <input id="intensity" type="range" min="0" max="1" step="0.01" value="0"><output id="intensityOut"></output></label>
+  </section>
+
+  <h2>Live output (AnalyserNode on the master bus)</h2>
+  <section class="panel">
+    <canvas id="wave" width="1000" height="180" aria-label="Waveform"></canvas>
+    <div style="height: 8px;"></div>
+    <canvas id="spec" width="1000" height="220" aria-label="Spectrum, 0 to 8 kHz"></canvas>
+  </section>
+
+  <h2>Offline analysis</h2>
+  <section class="panel">
+    <div class="row">
+      <button id="analyse" class="primary">Analyse every sound offline</button>
+      <span id="analyseStatus">Renders each sound at pitch 1, volume 1 through OfflineAudioContext.</span>
+    </div>
+    <div id="report" class="scroll" style="margin-top: 12px;"></div>
+    <pre id="reportText" hidden></pre>
+  </section>
+</main>
+
+<script type="module">
+import { audio, SOUND_NAMES, getOutputNode, renderSound } from '../src/audio.js';
+
+// Intended character per sound, checked by eye against the measured numbers.
+const PURPOSE = {
+  dash: 'whoosh, fast rising air rip',
+  dashReady: 'subtle tick',
+  kill: 'bright, short (under 250 ms)',
+  multiKill: 'bigger chord burst',
+  pulse: 'low shockwave thump',
+  reflect: 'metallic ping',
+  perfectPulse: 'bright bell arpeggio',
+  hurt: 'low and harsh',
+  enemyShoot: 'short amber pew',
+  chargerTelegraph: 'rising warning whine',
+  chargerLunge: 'aggressive downward rip',
+  mineArm: 'two mechanical beeps',
+  mineExplode: 'deep boom',
+  comboTierUp: 'rising fanfare',
+  comboLost: 'falling sad glide',
+  waveStart: 'tension sweep, then chord',
+  gameOver: 'descending minor phrase',
+  uiClick: 'tiny tick',
+  uiStart: 'two-note upbeat',
+  spawnWarn: 'two alarm beeps',
+};
+
+const $ = (id) => document.getElementById(id);
+const status = $('status');
+let analyser = null;
+
+function ensureAudio() {
+  const ok = audio.init();
+  if (ok && !analyser) {
+    const out = getOutputNode();
+    if (out) {
+      analyser = out.context.createAnalyser();
+      analyser.fftSize = 2048;
+      out.node.connect(analyser);
+    }
+  }
+  if (ok) {
+    const ctx = getOutputNode()?.context;
+    status.textContent = 'Audio live. AudioContext state: ' + (ctx ? ctx.state : 'unknown') + '.';
+  } else {
+    status.textContent = 'Web Audio is unavailable in this browser.';
+  }
+  return ok;
+}
+
+const pitch = $('pitch');
+const volume = $('volume');
+const pan = $('pan');
+const intensity = $('intensity');
+function bindOutput(input, out, digits) {
+  const update = () => { out.textContent = (+input.value).toFixed(digits); };
+  input.addEventListener('input', update);
+  update();
+}
+bindOutput(pitch, $('pitchOut'), 2);
+bindOutput(volume, $('volumeOut'), 2);
+bindOutput(pan, $('panOut'), 2);
+bindOutput(intensity, $('intensityOut'), 2);
+const opts = () => ({ pitch: +pitch.value, volume: +volume.value, pan: +pan.value });
+
+$('enable').addEventListener('click', () => ensureAudio());
+
+const grid = $('grid');
+for (const name of SOUND_NAMES) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.title = PURPOSE[name];
+  b.addEventListener('click', () => {
+    ensureAudio();
+    audio.play(name, opts());
+  });
+  grid.append(b);
+}
+
+// A rising combo: each kill is half a semitone higher. Tier-ups at kills 5, 10 and 15.
+$('combo').addEventListener('click', () => {
+  ensureAudio();
+  const base = +pitch.value;
+  for (let i = 0; i < 20; i++) {
+    setTimeout(() => {
+      audio.play('kill', { ...opts(), pitch: base * 2 ** (i / 24) });
+      if (i === 4 || i === 9 || i === 14) audio.play('comboTierUp', opts());
+    }, i * 90);
+  }
+});
+
+// Stress test: 30 kills in one second must stay clean (voice stealing).
+$('burst').addEventListener('click', () => {
+  ensureAudio();
+  const base = +pitch.value;
+  for (let i = 0; i < 30; i++) {
+    setTimeout(() => audio.play('kill', { ...opts(), pitch: base * 2 ** (i / 24) }), i * 33);
+  }
+});
+
+$('musicStart').addEventListener('click', () => {
+  ensureAudio();
+  audio.setMusicIntensity(+intensity.value);
+  audio.startMusic();
+});
+$('musicStop').addEventListener('click', () => audio.stopMusic());
+intensity.addEventListener('input', () => {
+  ensureAudio();
+  audio.setMusicIntensity(+intensity.value);
+});
+
+// ---- live analyser drawing
+const waveCtx = $('wave').getContext('2d');
+const specCtx = $('spec').getContext('2d');
+const timeBuf = new Uint8Array(2048);
+const freqBuf = new Uint8Array(1024);
+
+function drawLive() {
+  requestAnimationFrame(drawLive);
+  const wc = waveCtx;
+  const sc = specCtx;
+  const W = 1000;
+  const WH = 180;
+  const SH = 220;
+  wc.fillStyle = '#050a18';
+  wc.fillRect(0, 0, W, WH);
+  sc.fillStyle = '#050a18';
+  sc.fillRect(0, 0, W, SH);
+
+  // zero line
+  wc.strokeStyle = '#17305a';
+  wc.beginPath();
+  wc.moveTo(0, WH / 2);
+  wc.lineTo(W, WH / 2);
+  wc.stroke();
+
+  if (analyser) {
+    analyser.getByteTimeDomainData(timeBuf);
+    wc.strokeStyle = '#3cf2ff';
+    wc.lineWidth = 2;
+    wc.beginPath();
+    for (let i = 0; i < timeBuf.length; i++) {
+      const x = (i / (timeBuf.length - 1)) * W;
+      const y = (timeBuf[i] / 255) * WH;
+      if (i === 0) wc.moveTo(x, y); else wc.lineTo(x, y);
+    }
+    wc.stroke();
+
+    analyser.getByteFrequencyData(freqBuf);
+    const binHz = analyser.context.sampleRate / analyser.fftSize;
+    const maxBin = Math.min(freqBuf.length, Math.floor(8000 / binHz));
+    const barW = W / maxBin;
+    const grad = sc.createLinearGradient(0, SH, 0, 0);
+    grad.addColorStop(0, '#3cf2ff');
+    grad.addColorStop(0.6, '#ffe066');
+    grad.addColorStop(1, '#ff3d81');
+    sc.fillStyle = grad;
+    for (let i = 0; i < maxBin; i++) {
+      const h = (freqBuf[i] / 255) * (SH - 16);
+      sc.fillRect(i * barW, SH - h, Math.max(1, barW - 1), h);
+    }
+    sc.fillStyle = '#8fa6cf';
+    sc.font = '12px system-ui, sans-serif';
+    sc.fillText('0 Hz', 4, SH - 4);
+    sc.fillText('8 kHz', W - 46, SH - 4);
+  } else {
+    sc.fillStyle = '#8fa6cf';
+    sc.font = '14px system-ui, sans-serif';
+    sc.fillText('Analyser idle: press Enable audio or any sound button', 16, SH / 2);
+  }
+}
+drawLive();
+
+// ---- offline analysis
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    const half = len >> 1;
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let j = 0; j < half; j++) {
+        const a = i + j;
+        const b = a + half;
+        const vr = re[b] * cr - im[b] * ci;
+        const vi = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - vr;
+        im[b] = im[a] - vi;
+        re[a] += vr;
+        im[a] += vi;
+        const ncr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = ncr;
+      }
+    }
+  }
+}
+
+function analyse(buf) {
+  const x = buf.getChannelData(0);
+  const sr = buf.sampleRate;
+  let peak = 0;
+  let sumSq = 0;
+  let last = -1;
+  for (let i = 0; i < x.length; i++) {
+    const v = x[i];
+    const a = Math.abs(v);
+    if (a > peak) peak = a;
+    sumSq += v * v;
+    if (a > 0.001) last = i; // last sample above -60 dBFS
+  }
+  const active = last + 1;
+  const rms = Math.sqrt(sumSq / x.length);
+
+  // Dominant frequency: Hann-windowed FFT over the active region, DC and sub-20 Hz excluded.
+  let n = 1;
+  while (n < active) n <<= 1;
+  n = Math.min(n, 1 << 17);
+  const len = Math.min(active, n);
+  const re = new Float64Array(n);
+  const im = new Float64Array(n);
+  for (let i = 0; i < len; i++) {
+    re[i] = x[i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / Math.max(1, len - 1)));
+  }
+  fft(re, im);
+  let best = 0;
+  let bestHz = 0;
+  for (let k = 1; k < n / 2; k++) {
+    const hz = (k * sr) / n;
+    if (hz < 20) continue;
+    const m = re[k] * re[k] + im[k] * im[k];
+    if (m > best) { best = m; bestHz = hz; }
+  }
+  return { duration: active / sr, peak, rms, dominant: bestHz };
+}
+
+function check(name, r) {
+  const issues = [];
+  if (!(r.peak >= 0.05 && r.peak <= 1.0)) issues.push('peak outside 0.05 to 1.0');
+  if (r.peak >= 0.999) issues.push('clips');
+  if (name === 'kill' && r.duration >= 0.25) issues.push('kill not under 250 ms');
+  return issues.length ? issues.join('; ') : 'OK';
+}
+
+const dB = (v) => (v > 0 ? 20 * Math.log10(v) : -Infinity).toFixed(1);
+
+$('analyse').addEventListener('click', async () => {
+  const btn = $('analyse');
+  const label = $('analyseStatus');
+  btn.disabled = true;
+  const rows = [];
+  try {
+    for (const name of SOUND_NAMES) {
+      label.textContent = 'rendering ' + name + ' (' + (rows.length + 1) + '/' + SOUND_NAMES.length + ')';
+      const buf = await renderSound(name, { pitch: 1, volume: 1, seconds: 2 });
+      if (!buf) { label.textContent = 'OfflineAudioContext unavailable'; break; }
+      const r = analyse(buf);
+      rows.push({ name, ...r, verdict: check(name, r) });
+    }
+  } catch (err) {
+    label.textContent = 'analysis failed: ' + err;
+  }
+  btn.disabled = false;
+  if (rows.length === 0) return;
+  label.textContent = 'done: ' + rows.length + ' sounds analysed';
+  window.soundReport = rows;
+
+  const head = '| Sound | Intended character | Duration (ms) | Peak | RMS (dBFS) | Dominant (Hz) | Check |';
+  const sep = '|---|---|---:|---:|---:|---:|---|';
+  const md = rows.map((r) =>
+    `| ${r.name} | ${PURPOSE[r.name]} | ${(r.duration * 1000).toFixed(1)} | ${r.peak.toFixed(3)} | ${dB(r.rms)} | ${r.dominant.toFixed(0)} | ${r.verdict} |`);
+  $('reportText').hidden = false;
+  $('reportText').textContent = [head, sep, ...md].join('\n');
+
+  const table = document.createElement('table');
+  table.innerHTML = '<thead><tr><th>Sound</th><th>Intended character</th><th class="num">Duration (ms)</th>'
+    + '<th class="num">Peak</th><th class="num">RMS (dBFS)</th><th class="num">Dominant (Hz)</th><th>Check</th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const cells = [
+      r.name,
+      PURPOSE[r.name],
+      (r.duration * 1000).toFixed(1),
+      r.peak.toFixed(3),
+      dB(r.rms),
+      r.dominant.toFixed(0),
+    ];
+    for (const [i, c] of cells.entries()) {
+      const td = document.createElement('td');
+      td.textContent = c;
+      if (i >= 2 && i <= 5) td.className = 'num';
+      tr.append(td);
+    }
+    const vt = document.createElement('td');
+    vt.textContent = r.verdict;
+    vt.className = r.verdict === 'OK' ? 'ok' : 'bad';
+    tr.append(vt);
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  $('report').replaceChildren(table);
+});
+</script>
+</body>
+</html>
