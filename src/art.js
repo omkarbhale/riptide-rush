@@ -21,6 +21,11 @@ const R = 14;
 // Pulse reach from issue #1 (~110 px). Used only to fade the ring as it expands.
 const PULSE_MAX_RADIUS = 110;
 
+// Reflected enemy bullets (#143): their own lime, used in core-glow, ring and trail. Not the player's cyan or
+// white, and not the enemy amber.
+const REFLECTED_BULLET = '#8dff3c';
+const REFLECTED_CORE = '#eaffc2';
+
 export const PALETTE = Object.freeze({
   deepTop: '#050a18',
   deepBottom: '#0a1830',
@@ -1496,8 +1501,9 @@ export const draw = {
     ctx.restore();
   },
 
-  // Enemy bullet: amber by default, cyan when reflected.
-  // A bright white-hot core, a strong glow, a pulsing outline, and a short trail.
+  // Enemy bullet: amber by default, lime when reflected (#143). Lime is neither the player's cyan nor the
+  // enemy amber, so a reflected bullet never reads as Rip. The core is a pale lime, not the player's white.
+  // A bright core, a strong glow, a pulsing outline, and a short trail.
   // The trail needs opts.vx and opts.vy (the velocity); without them the bullet has no trail.
   bullet(ctx, x, y, t, opts) {
     const o = readOpts(opts);
@@ -1505,8 +1511,8 @@ export const draw = {
     const px = num(x, 0);
     const py = num(y, 0);
     const reflected = o.reflected;
-    const color = reflected ? PALETTE.player : PALETTE.bullet;
-    const key = reflected ? 'cyan' : 'amber';
+    const color = reflected ? REFLECTED_BULLET : PALETTE.bullet;
+    const key = reflected ? 'lime' : 'amber';
     const breathe = 1 + 0.08 * Math.sin(time * 18 + px * 0.1);
     const pulse = 0.5 + 0.5 * Math.sin(time * 9 + px * 0.05 + py * 0.07);
     const size = 36 * o.scale * breathe; // glow diameter
@@ -1566,7 +1572,7 @@ export const draw = {
     }
     ctx.globalAlpha = 1;
 
-    ctx.fillStyle = reflected ? PALETTE.dash : '#fff8e6';
+    ctx.fillStyle = reflected ? REFLECTED_CORE : '#fff8e6';
     ctx.beginPath();
     ctx.arc(px, py, 3.4 * o.scale, 0, TAU);
     ctx.fill();

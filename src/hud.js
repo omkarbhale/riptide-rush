@@ -320,6 +320,7 @@ export function createHud() {
     killDashes: 0, // dashes that killed at least one enemy (the summary's accuracy)
     dashKilled: false, // whether the current dash has killed yet
     banners: [], // { text, color, size, y, t, life }
+    boss: { game: null, id: null, shown: 0, lastHp: null, maxHp: 1, flashT: 0, goneT: 0 }, // the boss bar (#129)
     alpha: { score: 1, wave: 1, hearts: 1, dash: 1, pulse: 1 },
   };
 }
@@ -358,6 +359,7 @@ export function hudUpdate(hud, dt, game, L) {
   hud.time += dt;
   for (const b of hud.banners) b.t += dt;
   hud.banners = hud.banners.filter((b) => b.t < b.life);
+  stepBossBar(hud, dt, game);
   if (!game) return;
 
   const target = game.score;
@@ -841,6 +843,132 @@ function drawBanners(ctx, L, hud) {
     text(ctx, b.text, 0, 0, `bold ${b.size * k}px ${FONT}`, b.color, 'center', 'middle');
     ctx.restore();
   }
+}
+
+// ---- boss health bar (#129) ------------------------------------------------------------------------
+// The Warden's bar at the top of the arena: its name, one segment per hit point (each dash on the exposed core
+// takes one), a tick at the phase 2 line, a ghost of the hit points just lost, a flash on each hit, and the weak
+// point state. When the Warden falls the bar reads DEFEATED for a moment, then goes.
+const BOSS_NAME = 'ANGLERFISH WARDEN';
+const BOSS_FLASH_S = 0.25; // a hit point lost: the segments flash this long (real time)
+const BOSS_GONE_S = 1.4; // DEFEATED stays this long after the Warden falls (real time)
+const BOSS_GHOST_RATE = 5; // per second: how fast the ghost of lost hit points drops onto the live count
+
+// The Warden on the field, or null.
+export function bossOf(game) {
+  if (!game || !Array.isArray(game.enemies)) return null;
+  for (const e of game.enemies) if (e.kind === 'warden' && e.alive !== false) return e;
+  return null;
+}
+
+// Where the bar sits, in CSS px. Centred on the window, beside the top panels, when there is room between them;
+// below them when there is not, so the bar never covers a HUD block.
+export function bossBarBox(L, modCount = 0) {
+  const k = L.hs;
+  const w = L.winW;
+  const boxes = hudBoxes(L, modCount);
+  const room = 2 * Math.min(w / 2 - (boxes.score.x + boxes.score.w + 12 * k), boxes.wave.x - 12 * k - w / 2);
+  const h = 46 * k;
+  if (room >= 260 * k) {
+    const bw = Math.min(440 * k, room);
+    return { x: w / 2 - bw / 2, y: 8 * k, w: bw, h };
+  }
+  const top = Math.max(boxes.score.y + boxes.score.h, boxes.wave.y + boxes.wave.h) + 8 * k;
+  const bw = Math.min(440 * k, w - 24 * k);
+  return { x: w / 2 - bw / 2, y: top, w: bw, h };
+}
+
+// Keeps the bar's animation state, in real time. A new game resets it; a Warden that leaves starts DEFEATED.
+export function stepBossBar(hud, dt, game) {
+  const b = hud.boss;
+  if (b.game !== game) Object.assign(b, { game, id: null, shown: 0, lastHp: null, maxHp: 1, flashT: 0, goneT: 0 });
+  b.flashT = Math.max(0, b.flashT - dt);
+  b.goneT = Math.max(0, b.goneT - dt);
+  const e = bossOf(game);
+  if (e === null) {
+    if (b.id !== null) {
+      b.goneT = BOSS_GONE_S;
+      b.id = null;
+    }
+    return;
+  }
+  if (b.id !== e) {
+    b.id = e;
+    b.shown = e.hp;
+    b.lastHp = e.hp;
+    b.goneT = 0;
+  }
+  if (e.hp < b.lastHp) b.flashT = BOSS_FLASH_S;
+  b.lastHp = e.hp;
+  b.maxHp = e.maxHp;
+  b.shown += (e.hp - b.shown) * Math.min(1, dt * BOSS_GHOST_RATE);
+}
+
+// Draws the bar while the Warden lives, and for its DEFEATED beat after. Returns false when there is nothing to draw.
+export function drawBossBar(ctx, L, game, hud) {
+  const b = hud.boss;
+  const e = bossOf(game);
+  const live = e !== null;
+  if (!live && !(b.goneT > 0)) return false;
+  const k = L.hs;
+  const box = bossBarBox(L, Object.keys(game.modifiers).length);
+  const fade = live ? 1 : clamp01(b.goneT / BOSS_GONE_S);
+  const maxHp = Math.max(1, Math.round(live ? e.maxHp : b.maxHp));
+  const hp = live ? Math.max(0, e.hp) : 0;
+  const phase2 = live && e.phase === 2;
+  const liveColor = phase2 ? PALETTE.wardenPhase2 : PALETTE.danger;
+  const open = live && !!e.exposed;
+  group(ctx, fade, () => {
+    backing(ctx, box, k);
+    const x0 = box.x + 10 * k;
+    const inner = box.w - 20 * k;
+    // The name on the left; on the right, WEAK POINT OPEN while the core can be hit, else the phase.
+    text(ctx, live ? BOSS_NAME : 'DEFEATED', x0, box.y + 17 * k, `bold ${13 * k}px ${FONT}`, live ? SOFT : PALETTE.gold);
+    if (live) {
+      const label = open ? 'WEAK POINT OPEN' : phase2 ? 'PHASE 2' : 'PHASE 1';
+      text(ctx, label, x0 + inner, box.y + 17 * k, `bold ${12 * k}px ${FONT}`, open ? PALETTE.gold : DIM, 'right');
+    }
+    // One segment per hit point.
+    const gap = 3 * k;
+    const segW = (inner - gap * (maxHp - 1)) / maxHp;
+    const sy = box.y + 27 * k;
+    const sh = 11 * k;
+    const segX = (i) => x0 + i * (segW + gap);
+    const ghostTo = live ? Math.ceil(b.shown) : 0;
+    const flash = live && b.flashT > 0 ? 0.6 * (b.flashT / BOSS_FLASH_S) : 0;
+    for (let i = 0; i < maxHp; i++) {
+      ctx.fillStyle = 'rgba(234, 255, 255, 0.08)';
+      ctx.fillRect(segX(i), sy, segW, sh);
+      if (i < hp) {
+        ctx.fillStyle = liveColor;
+        ctx.fillRect(segX(i), sy, segW, sh);
+        if (flash > 0) {
+          ctx.fillStyle = `rgba(255, 255, 255, ${flash})`;
+          ctx.fillRect(segX(i), sy, segW, sh);
+        }
+      } else if (i < ghostTo) {
+        ctx.fillStyle = 'rgba(234, 255, 255, 0.35)';
+        ctx.fillRect(segX(i), sy, segW, sh);
+      }
+    }
+    // The phase 2 line: the bar passes it at half hit points.
+    if (live && maxHp >= 2) {
+      ctx.fillStyle = SOFT;
+      ctx.fillRect(segX(Math.floor(maxHp / 2)) - gap / 2 - 0.75 * k, sy - 3 * k, 1.5 * k, sh + 6 * k);
+    }
+    // The weak point: a gold outline that pulses while the core is open.
+    if (open) {
+      const pulse = 0.5 + 0.5 * Math.sin(hud.time * 14);
+      ctx.save();
+      ctx.globalAlpha = ctx.globalAlpha * (0.5 + 0.5 * pulse);
+      ctx.strokeStyle = PALETTE.gold;
+      ctx.lineWidth = 2 * k;
+      roundRect(ctx, box.x - 2 * k, box.y - 2 * k, box.w + 4 * k, box.h + 4 * k, 16 * k);
+      ctx.stroke();
+      ctx.restore();
+    }
+  });
+  return true;
 }
 
 // The in-game HUD for the playing and paused screens (the paused screen dims it).
@@ -1336,6 +1464,7 @@ export function drawHudLayer(ctx, L, view) {
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
   if (game && screen === 'playing') drawHud(ctx, L, game, hud, view.highScore ?? 0, true);
+  if (game && screen === 'playing') drawBossBar(ctx, L, game, hud);
   if (game && screen === 'paused') drawHud(ctx, L, game, hud, view.highScore ?? 0, false);
   if (screen === 'title') drawTitle(ctx, L, view);
   if (screen === 'howto') drawHowto(ctx, L, view);

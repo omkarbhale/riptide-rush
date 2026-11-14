@@ -6,6 +6,7 @@ import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, PULSE, SPAWN, ENEMY, PLAYER, D
 import { dashPreview } from './game.js';
 import { draw, PALETTE } from './art.js';
 import { drawPickups } from './pickups-art.js'; // PICKUPS (#54)
+import { drawModesLayer } from './modes-ui.js'; // mode picker, mode label, daily share prompt (#124)
 import {
   DEFAULT_SETTINGS,
   computeLayout,
@@ -13,6 +14,7 @@ import {
   drawHudLayer,
   hudRectsLogical,
   clampOutOfRects,
+  bossOf,
 } from './hud.js';
 import {
   AIM_RAY,
@@ -141,10 +143,23 @@ function headingOf(e, dt) {
   return h;
 }
 
-// Telegraph progress 0..1 for kinds that have a telegraph in config (Charger today).
-function telegraphOf(e) {
+// Telegraph progress 0..1 for kinds that have a telegraph in config (Charger today, and the #129 kinds below).
+export function telegraphOf(e) {
   // A spitter's wind-up rises 0 to 1 over its own timer (the sim exposes it as e.telegraph).
   if (e.kind === 'spitter') return e.state === 'windup' ? clamp01(e.telegraph) : 0;
+  // A Puffer's swell is its telegraph: the burst is due when the swell ends.
+  if (e.kind === 'puffer') return e.swelling ? clamp01(e.swell ?? 0) : 0;
+  // A Phase Eel's ripple is its telegraph: it surfaces when the ripple ends. It starts at 0.4, not 0, so the ripple is
+  // readable on its first frame, and grows to full over the ripple.
+  if (e.kind === 'phaseeel') {
+    return e.state === 'ripple' ? 0.4 + 0.6 * clamp01(1 - e.stateT / ENEMY.phaseeel.rippleTime) : 0;
+  }
+  // The Warden's telegraph runs 1 s in phase 1 and 0.8 s in phase 2; the snap lands at its end.
+  if (e.kind === 'warden') {
+    if (e.state !== 'telegraph') return 0;
+    const dur = e.phase === 2 ? ENEMY.warden.phase2Telegraph : ENEMY.warden.telegraph;
+    return clamp01(1 - e.stateT / dur);
+  }
   const dur = ENEMY[e.kind]?.telegraph;
   if (!dur || e.state !== 'telegraph') return 0;
   return clamp01(1 - e.stateT / dur);
@@ -194,18 +209,343 @@ function drawWarnings(ctx, game, t, avoid) {
   }
 }
 
+// ---- #114 enemies and their hazards (#129) ---------------------------------------------------------
+// Every state field the sim exposes reaches the art here. The art's own defaults would draw a shield aura and a
+// hidden eel, so each field is passed explicitly, falling back to the value that draws the plain enemy.
+const ARC_HEIGHT = 60; // px: the apex of an ink arc above its ground point
+const HIT_FLASH_S = 0.18; // a lost hit point flashes the enemy this long (real time)
+const EXPOSE_RAMP_S = 0.1; // the weak point lights up over this long after the Warden opens
+const BOSS_INTRO_S = 2.2; // the intro banner's life (real time)
+const BOSS_DEATH_S = 0.9; // the Warden's death sequence (real time)
+const WEAK_LABEL_DY = 84; // px below the Warden's centre for its WEAK POINT label, clear of the intro banner
+
+// Per-enemy presentation memory, keyed by the enemy object: the last hit point seen, and whether the weak point
+// was open last frame. Real-time state, written only from drawEnemies.
+const hpSeen = new WeakMap();
+const exposeSeen = new WeakMap();
+
+// White flash over a lost hit point (a Shield Bearer's hit, or a Warden's hit on the exposed core).
+function hitFlashOf(e, t) {
+  let s = hpSeen.get(e);
+  if (s === undefined) {
+    s = { hp: e.hp, at: -Infinity };
+    hpSeen.set(e, s);
+  }
+  if (typeof e.hp === 'number') {
+    if (e.hp < s.hp) s.at = t;
+    s.hp = e.hp;
+  }
+  return 0.8 * clamp01(1 - (t - s.at) / HIT_FLASH_S);
+}
+
+// The Warden's weak point: 0 while closed; once open it lights up over EXPOSE_RAMP_S and then pulses.
+function exposeOf(e, t) {
+  let s = exposeSeen.get(e);
+  if (s === undefined) {
+    s = { on: false, at: -Infinity };
+    exposeSeen.set(e, s);
+  }
+  const on = !!e.exposed;
+  if (on !== s.on) {
+    s.on = on;
+    s.at = t;
+  }
+  if (!on) return 0;
+  return clamp01((t - s.at) / EXPOSE_RAMP_S) * (0.8 + 0.2 * Math.sin(t * 12));
+}
+
+// Whether the Warden's next snap is a lure: the same count the sim uses (enemies-extra.js enterTelegraph).
+export function lureNext(e) {
+  const cycle = e.phase === 2 ? ENEMY.warden.phase2Cycle : ENEMY.warden.cycle;
+  const every = Math.max(1, Math.round(ENEMY.warden.lureEvery / cycle));
+  return (e.snaps + 1) % every === 0;
+}
+
+// The per-type opts for draw.enemy (the sim's state, read per frame). Returns a fresh object.
+export function typeOpts(e, t) {
+  switch (e.kind) {
+    case 'puffer':
+      // Inflates with the swell; a beat of white over the swell tells it is about to burst.
+      return {
+        inflate: clamp01(e.swell ?? 0),
+        flash: e.swelling ? 0.2 + 0.3 * (0.5 + 0.5 * Math.sin(t * 22)) : 0,
+      };
+    case 'shieldbearer':
+      // The aura is drawn only while it is up: a Pulse stagger takes it down for auraOffTime.
+      return { aura: e.aura ? (e.auraRadius ?? ENEMY.shieldbearer.auraRadius) : 0 };
+    case 'phaseeel':
+      // A hidden eel draws nothing; its ripple (the telegraph) does.
+      return { visibility: e.visible ? 1 : 0 };
+    case 'warden':
+      return { phase: e.phase === 2 ? 2 : 1, vulnerable: exposeOf(e, t), hp: e.hp, maxHp: e.maxHp };
+    default:
+      return {};
+  }
+}
+
+// The Puffer's burst reach: a dashed ring at shardRange that fills in as the swell grows.
+function drawPufferReach(ctx, x, y, swell, t) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.15 + 0.5 * swell;
+  ctx.strokeStyle = PALETTE.bullet;
+  ctx.lineWidth = 1.5 + swell;
+  ctx.setLineDash([6, 8]);
+  ctx.lineDashOffset = -t * 30;
+  ctx.beginPath();
+  ctx.arc(x, y, ENEMY.puffer.shardRange, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The Warden's lure telegraph: a dashed ring where the lure Drifters will appear at its snap.
+function drawLureRing(ctx, x, y, tg, t) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.25 + 0.6 * tg;
+  ctx.strokeStyle = PALETTE.wardenLure;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8, 10]);
+  ctx.lineDashOffset = -t * 40;
+  ctx.beginPath();
+  ctx.arc(x, y, ENEMY.warden.lureRing, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// A lure Drifter wears a faint ring in the lure colour, so it is not mistaken for a plain Drifter.
+function drawLureTint(ctx, x, y, r, t) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.35 + 0.15 * Math.sin(t * 6);
+  ctx.strokeStyle = PALETTE.wardenLure;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(x, y, r * 1.7, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The Phase Eel's ripple: a dashed ring that closes in on the spot it will surface at, so the warning reads from the
+// first frame of the ripple and tightens as the surfacing nears.
+function drawRippleClose(ctx, x, y, tg, t) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.2 + 0.6 * tg;
+  ctx.strokeStyle = PALETTE.phaseeel;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([5, 7]);
+  ctx.lineDashOffset = -t * 30;
+  ctx.beginPath();
+  ctx.arc(x, y, 14 + 46 * (1 - tg), 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The weak point, ringed in gold while it is open: a pulsing ring over the core, which the art draws at WEAK_CORE
+// in the Warden's own frame (its nose is +x). The ring follows the Warden's heading, so the core stays under it.
+const WEAK_CORE = Object.freeze({ dx: -14, r: 22 }); // a quarter of the art's Warden unit (W = 4R = 56) behind centre
+function drawWeakRing(ctx, x, y, angle, v, t) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = clamp01(v) * (0.55 + 0.45 * Math.sin(t * 12));
+  ctx.strokeStyle = PALETTE.gold;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(WEAK_CORE.dx, 0, WEAK_CORE.r * (1 + 0.12 * Math.sin(t * 12)), 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The weak point's label, above the Warden while the core can be hit.
+function drawWeakLabel(ctx, x, y, v) {
+  ctx.save();
+  ctx.globalAlpha = clamp01((v - 0.2) / 0.5);
+  ctx.font = `bold 12px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = PALETTE.gold;
+  ctx.fillText('WEAK POINT', x, y);
+  ctx.restore();
+}
+
 function drawEnemies(ctx, game, view) {
   for (const e of game.enemies) {
     const x = lerp(e.px, e.x, view.alpha);
     const y = lerp(e.py, e.y, view.alpha);
+    const t = view.time;
     const tg = telegraphOf(e);
-    if (tg > 0) drawAimLine(ctx, e, x, y, tg, view.time);
-    drawEnemy(ctx, e.kind, e.r, x, y, headingOf(e, view.dt), view.time, {
-      scale: popScale(e),
-      telegraph: tg,
-      flash: flashOf(e),
-    });
+    if (tg > 0) drawAimLine(ctx, e, x, y, tg, t);
+    if (e.kind === 'puffer' && e.swelling) drawPufferReach(ctx, x, y, clamp01(e.swell ?? 0), t);
+    if (e.kind === 'phaseeel' && tg > 0) drawRippleClose(ctx, x, y, tg, t);
+    if (e.kind === 'warden' && tg > 0 && lureNext(e)) drawLureRing(ctx, x, y, tg, t);
+    const o = typeOpts(e, t);
+    o.scale = popScale(e);
+    o.telegraph = tg;
+    o.barrier = e.barrier ? 1 : 0;
+    o.flash = Math.max(flashOf(e), hitFlashOf(e, t), o.flash ?? 0);
+    const angle = headingOf(e, view.dt);
+    drawEnemy(ctx, e.kind, e.r, x, y, angle, t, o);
+    if (e.lureOf != null) drawLureTint(ctx, x, y, e.r, t);
+    if (e.kind === 'warden' && (o.vulnerable ?? 0) > 0.05) drawWeakRing(ctx, x, y, angle, o.vulnerable, t);
+    if (e.kind === 'warden' && (o.vulnerable ?? 0) > 0.2) drawWeakLabel(ctx, x, y + WEAK_LABEL_DY, o.vulnerable);
   }
+}
+
+// Ground layer, under the enemies: ink puddles (they slow Rip), and the landing shadow of each arc in flight. The
+// shadow is the telegraph: it fills in over the flight, and the puddle it becomes lasts puddleTime.
+function drawGround(ctx, game, t) {
+  const ex = game.extras;
+  if (!ex) return;
+  for (const pd of ex.puddles) {
+    if (pd.alive) draw.hazard(ctx, 'puddle', pd.x, pd.y, pd.r, t, { life: 1 - pd.t / pd.dur });
+  }
+  for (const s of ex.shells) {
+    if (s.alive && s.state === 'flight') {
+      draw.hazard(ctx, 'shadow', s.lx, s.ly, ENEMY.inksquid.puddleRadius, t, { progress: clamp01(s.t / s.dur) });
+    }
+  }
+}
+
+// Air layer, above the enemies and below the bullets: ink arcs and Puffer shards. An arc in flight is a blob that
+// rises and falls over its ground point; a reflected arc flies back as a cyan shot. Shards are small amber diamonds
+// with a short trail, so they read apart from the enemy bullets' glow.
+function drawAirborne(ctx, game, t) {
+  const ex = game.extras;
+  if (!ex) return;
+  for (const s of ex.shells) {
+    if (!s.alive) continue;
+    if (s.state === 'reflect') {
+      draw.bullet(ctx, s.x, s.y, t, { reflected: true, scale: 1 });
+      continue;
+    }
+    const k = clamp01(s.t / s.dur);
+    const lift = Math.sin(Math.PI * k);
+    draw.hazard(ctx, 'shadow', s.x, s.y, 9, t, { progress: 1 });
+    draw.hazard(ctx, 'lob', s.x, s.y - lift * ARC_HEIGHT, 9, t, { height: lift });
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const r = ENEMY.puffer.shardRadius;
+  for (const sh of ex.shards) {
+    if (!sh.alive) continue;
+    const sp = Math.hypot(sh.vx, sh.vy) || 1;
+    const ux = sh.vx / sp;
+    const uy = sh.vy / sp;
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = PALETTE.bullet;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(sh.x - ux * r * 3, sh.y - uy * r * 3);
+    ctx.lineTo(sh.x, sh.y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = PALETTE.bullet;
+    ctx.beginPath();
+    ctx.moveTo(sh.x + ux * r * 1.8, sh.y + uy * r * 1.8);
+    ctx.lineTo(sh.x - uy * r * 0.9, sh.y + ux * r * 0.9);
+    ctx.lineTo(sh.x - ux * r * 0.8, sh.y - uy * r * 0.8);
+    ctx.lineTo(sh.x + uy * r * 0.9, sh.y - ux * r * 0.9);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ---- the Warden's intro and death (#129) ---------------------------------------------------------------
+// Presentation memory for the Warden: which one is live, when it arrived, and the last place it was seen (for its
+// death sequence). Reset whenever a new game object arrives.
+let bossState = null;
+
+function stepBoss(game, t) {
+  if (!bossState || bossState.game !== game) {
+    bossState = { game, obj: null, last: null, lures: [], introAt: -Infinity, death: null };
+  }
+  const bs = bossState;
+  const w = bossOf(game);
+  if (w !== null) {
+    if (w !== bs.obj) {
+      bs.obj = w;
+      bs.introAt = t;
+      bs.death = null;
+    }
+    bs.last = { x: w.x, y: w.y, phase: w.phase, angle: headings.get(w) ?? 0 };
+    bs.lures = game.enemies
+      .filter((o) => o.lureOf === w.id && o.alive !== false)
+      .map((o) => ({ x: o.x, y: o.y }));
+  } else if (bs.obj !== null && bs.last !== null) {
+    // The Warden has left the field: it fell, and the boss wave ends with it.
+    bs.death = { ...bs.last, lures: bs.lures, at: t };
+    bs.obj = null;
+  }
+}
+
+// The death: two gold rings open out from where the Warden fell, its last silhouette swells and fades, and the
+// lure Drifters that fade with it leave small rings behind.
+function drawBossDeath(ctx, bs, t) {
+  const d = bs?.death;
+  if (!d) return;
+  const age = t - d.at;
+  if (age < 0 || age > BOSS_DEATH_S) return;
+  const k = clamp01(age / BOSS_DEATH_S);
+  const ease = 1 - (1 - k) * (1 - k) * (1 - k);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let j = 0; j < 2; j++) {
+    const f = clamp01((k - j * 0.15) / 0.85);
+    ctx.globalAlpha = (1 - f) * 0.9;
+    ctx.strokeStyle = PALETTE.gold;
+    ctx.lineWidth = 1 + 6 * (1 - f);
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, 30 + 240 * f, 0, TAU);
+    ctx.stroke();
+  }
+  const lf = clamp01(k * 1.4);
+  ctx.strokeStyle = PALETTE.wardenLure;
+  ctx.lineWidth = 2;
+  for (const p of d.lures) {
+    ctx.globalAlpha = 1 - lf;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4 + 26 * lf, 0, TAU);
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, 1 - k * 1.2);
+  drawEnemy(ctx, 'warden', ENEMY.warden.radius, d.x, d.y, d.angle, t, {
+    scale: 1 + 0.35 * ease,
+    flash: Math.max(0, 1 - k * 3),
+    phase: d.phase,
+    vulnerable: 1 - k,
+  });
+  ctx.restore();
+}
+
+// The intro banner: the Warden's name and the one rule that matters, over the arena for a moment. Window px.
+function drawBossIntro(ctx, L, bs, t) {
+  const age = t - (bs?.introAt ?? -Infinity);
+  if (!(age >= 0 && age < BOSS_INTRO_S)) return;
+  const k = L.hs;
+  const a = Math.min(clamp01(age / 0.2), clamp01((BOSS_INTRO_S - age) / 0.5));
+  const punch = 1 + 0.12 * (1 - clamp01(age / 0.3));
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.translate(L.winW / 2, L.py + L.ph * 0.3); // high: clear of the Warden's body and the WAVE banner
+  ctx.scale(punch, punch);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = PALETTE.danger;
+  ctx.shadowBlur = 18 * k;
+  ctx.font = `bold ${36 * k}px ${FONT}`;
+  ctx.fillStyle = PALETTE.danger;
+  ctx.fillText('ANGLERFISH WARDEN', 0, 0);
+  ctx.shadowBlur = 0;
+  ctx.font = `600 ${15 * k}px ${FONT}`;
+  ctx.fillStyle = 'rgba(234, 255, 255, 0.85)';
+  ctx.fillText('Dash the core when it opens. Dodge the lure.', 0, 34 * k);
+  ctx.restore();
 }
 
 // Death pops: an enemy that dies squashes along the dash direction, then pops out and fades, instead of
@@ -670,12 +1010,16 @@ export function drawFrame(ctx, view) {
     const avoid = hudRectsLogical(L, Object.keys(game.modifiers).length);
     if (!settings.reducedFlashes) drawDarken(ctx, fx); // a full-arena effect, so reduced flashes skip it
     lap('darken');
+    drawGround(ctx, game, view.time); // #129: ink puddles and arc shadows, under everything that moves
     drawWarnings(ctx, game, view.time, avoid);
     lap('warnings');
     drawPickups(ctx, pickupsBobbed(game, view.time), view.alpha, view.time); // PICKUPS (#54): pickups, shield aura, pickup fx
     lap('pickups');
+    stepBoss(game, view.time);
     drawEnemies(ctx, game, view);
     drawPops(ctx, fx, view.time, !settings.reducedFlashes);
+    drawBossDeath(ctx, bossState, view.time); // #129: the Warden's death, above its body
+    drawAirborne(ctx, game, view.time); // #129: arcs in flight and Puffer shards, above the enemies
     lap('enemies');
     drawBullets(ctx, game, view);
     lap('bullets');
@@ -709,5 +1053,7 @@ export function drawFrame(ctx, view) {
   // HUD, title, pause and game-over screens, in window pixels, scaled by L.hs and not by the arena.
   ctx.setTransform(dev, 0, 0, dev, 0, 0);
   drawHudLayer(ctx, L, { ...view, hud, settings, muted: settings.muted, menuRow: view.menuRow ?? 0 });
+  if (screen === 'playing' && game) drawBossIntro(ctx, L, bossState, view.time); // #129: the Warden's arrival
+  drawModesLayer(ctx, L, view);
   lap('hud');
 }
