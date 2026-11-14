@@ -266,3 +266,49 @@ export function renderPolicy(name, a) {
   }
   return out.join('\n');
 }
+
+// The balance targets from the balance pass brief (#97), checked against a full run. Each row names the
+// measured value, the target and whether it holds. Thresholds are the brief's; nothing is tuned to them here.
+export function targetRows(perPolicy) {
+  const rows = [];
+  const add = (policy, name, value, target, ok) => rows.push({ policy, name, value, target, ok });
+  const b = perPolicy.beginner;
+  if (b) {
+    const p50 = b.survival.p50;
+    add('beginner', 'median survival, s', p50, '75-120', p50 >= 75 && p50 <= 120);
+    // Only waves that at least 30 runs reach: a wave one run reaches tells nothing about the wall.
+    const worstWave = Math.max(0, ...b.waveRows.filter((w) => w.reached >= 30).map((w) => w.deathRate));
+    add('beginner', 'worst wave death rate (waves reached by 30+ runs)', worstWave, '<= 40%', worstWave <= 0.4);
+    const worstType = Math.max(0, ...Object.values(b.hitsByType).map((n) => (b.hits > 0 ? n / b.hits : 0)));
+    add('beginner', 'largest single-type share of HP lost', worstType, '<= 60%', worstType <= 0.6);
+  }
+  const i = perPolicy.intermediate;
+  if (i) {
+    const p50 = i.survival.p50;
+    add('intermediate', 'median survival, s', p50, '150-270', p50 >= 150 && p50 <= 270);
+    add('intermediate', 'share reaching the 300 s cap', i.survivedToCapShare, '< 15%', i.survivedToCapShare < 0.15);
+  }
+  const e = perPolicy.expert;
+  if (e) {
+    add('expert', 'median survival, s', e.survival.p50, '>= 240', e.survival.p50 >= 240);
+    add('expert', 'median APM (dashes + pulses / min)', e.apm.p50, '>= 110', e.apm.p50 >= 110);
+    add('expert', 'average dash kills per dash', e.dashKillsPerDash, '>= 1.8', e.dashKillsPerDash >= 1.8);
+  }
+  for (const [name, a] of Object.entries(perPolicy)) {
+    const violated = Object.keys(a.violations).length;
+    const stalls = a.violations.WAVE_STALL?.runs ?? 0;
+    add(name, 'invariant violations (codes)', violated, '0', violated === 0);
+    add(name, 'runs with a stalled wave', stalls, '0', stalls === 0);
+  }
+  return rows;
+}
+
+export function renderTargets(perPolicy) {
+  const lines = ['## Balance targets', '', '| Policy | Measure | Value | Target | Holds |', '| --- | --- | --- | --- | --- |'];
+  const fmt = (v) => (typeof v === 'number' ? (Number.isInteger(v) ? String(v) : v.toFixed(v < 5 ? 2 : 1)) : String(v));
+  for (const r of targetRows(perPolicy)) {
+    const shown = r.name.includes('share') || r.name.includes('rate') ? `${(r.value * 100).toFixed(1)}%` : fmt(r.value);
+    lines.push(`| ${r.policy} | ${r.name} | ${shown} | ${r.target} | ${r.ok ? 'yes' : '**no**'} |`);
+  }
+  return lines.join('\n');
+}

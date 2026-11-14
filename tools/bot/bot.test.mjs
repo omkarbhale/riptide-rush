@@ -67,7 +67,8 @@ test('the checker flags an enemy outside its clamp', () => {
   drainEvents(g);
   g.spawning = false;
   g.enemies = [];
-  const e = spawnEnemy(g, 'splitter', W / 2, H + 50);
+  const e = spawnEnemy(g, 'splitter', W / 2, H / 2);
+  e.y = H + 50; // spawns are clamped now (#82), so push it out after the spawn
   const c = createChecker(g);
   c.afterStep([]);
   assert.ok(c.violations.has('ENEMY_OUT_OF_ARENA'));

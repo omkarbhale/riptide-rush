@@ -17,7 +17,7 @@ import { Worker } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 import { POLICIES } from './policies.mjs';
 import { runOne } from './sim-run.mjs';
-import { aggregatePolicy, renderPolicy } from './report.mjs';
+import { aggregatePolicy, renderPolicy, renderTargets } from './report.mjs';
 
 const CHUNK = 50; // seeds per worker task
 
@@ -118,6 +118,8 @@ async function main() {
   );
   lines.push('');
   for (const policy of chosen) lines.push(renderPolicy(policy.name, perPolicy[policy.name]));
+  lines.push(renderTargets(perPolicy));
+  lines.push('');
   process.stdout.write(lines.join('\n'));
   process.stdout.write('\n');
 
