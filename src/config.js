@@ -238,6 +238,7 @@ export const SPAWN = {
   groupLeadIn: 0.6,       // seconds from a wave starting to its first spawn
   drifterOnlyUntil: 30,   // run time (s) during which every spawn is a Drifter, to teach chaining
   waveTimeLimit: 14,      // seconds after which the next wave starts even if the current one has many left
+  bossHoldLimit: 60,      // #105: a boss wave holds for its boss for at most this long, so a boss never stalls the run
   releaseTimeLimit: 24,   // a release wave waits for a clear, but never longer than this: progress cannot stop (#83)
   spitterGateDrifters: 2, // the first Spitter is released once this many Drifters or fewer are alive (#84)
   spitterGateTime: 12,    // ...and never waits longer than this many seconds after it first became due

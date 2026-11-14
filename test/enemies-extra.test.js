@@ -668,6 +668,27 @@ test('a boss wave holds until its Warden dies: the next wave does not start whil
   assert.ok(started, 'wave 11 then starts');
 });
 
+test('a boss wave hands over after SPAWN.bossHoldLimit even while its Warden lives (#105: no stalled wave)', () => {
+  const g = createGame(7, { startWave: 10 });
+  g.time = SPAWN.drifterOnlyUntil;
+  let boss = null;
+  for (let i = 0; i < seconds(60) && !boss; i++) {
+    g.player.invuln = 1e9;
+    update(g, NONE, SIM_DT);
+    drainEvents(g);
+    boss = g.enemies.find((e) => e.kind === 'warden') ?? null;
+  }
+  assert.ok(boss, 'the Warden is released in wave 10');
+  // Keep the Warden alive and wave 10 active; the hold ends at the limit, and the next wave starts.
+  for (let i = 0; i < seconds(SPAWN.bossHoldLimit + 20) && g.wave.number === 10; i++) {
+    g.player.invuln = 1e9;
+    update(g, NONE, SIM_DT);
+    drainEvents(g);
+  }
+  assert.ok(boss.alive, 'the Warden still lives');
+  assert.equal(g.wave.number, 11, 'wave 11 has started');
+});
+
 // ---- Feedback fields and the soak ----------------------------------------------------------------
 
 const NEW_TYPES = new Set([

@@ -581,5 +581,7 @@ The arena was too empty for flow: schools died on arrival and about ten enemies 
 
 **Bot sense (harness only).** The beginner bot now sees a Spitter bullet only after 400 ms in view, and reacts to about half of the bullets (decided per bullet). It was blind to bullets before. The change makes the beginner numbers not comparable with playtest 003.
 
+**Boss hold (#114, limited in #105).** A boss wave holds for its boss, but for at most `SPAWN.bossHoldLimit` (60 s). After that it hands over as usual, and a living boss stays in the field. This keeps the harness free of stalled waves (see playtest 004).
+
 **Edge rule.** The release gate reads the field once per decision (`gateCounts`), so a blocked queue costs one pass per step, not one per entry. The sim filters the enemy and bullet lists only when something died. Neither changes what happens in a run.
 

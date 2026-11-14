@@ -604,7 +604,8 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
   c.timer = comboWindowFor(c.count);
   const mult = multiplierFor(c.count);
   const bonus = slashIndex > 1 ? COMBO.multiBonus * mult : 0;
-  const points = def.points * mult + bonus + (e.killBonus ?? 0); // killBonus: #114 lure Drifters
+  const lure = e.killBonus ?? 0; // #114: a lure Drifter's extra points
+  const points = def.points * mult + bonus + lure;
   game.score += points;
   game.kills += 1;
   const d = game.player.dash;
@@ -619,6 +620,7 @@ export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
     multi: slashIndex,
     bonus,
     points,
+    lure,
     hitStopMs: hitStopFor(slashIndex),
     cause,
   });
@@ -1219,7 +1221,9 @@ function updateSpawner(game, dt) {
       // #105: hand over once every school of this wave has been released, so the next wave's warnings show
       // while this wave's schools are still alive. The time limit is the backstop.
       // #114: a boss wave ends when its boss dies, so it never hands over early.
-      if (!w.boss && (queuedOf(game, w.number) === 0 || age >= SPAWN.waveTimeLimit)) beginWave(game, w.number + 1);
+      // A boss wave holds for its boss, but no longer than SPAWN.bossHoldLimit (#105: no stalled wave).
+      const holding = Boolean(w.boss) && age < SPAWN.bossHoldLimit;
+      if (!holding && (queuedOf(game, w.number) === 0 || age >= SPAWN.waveTimeLimit)) beginWave(game, w.number + 1);
     }
   }
 
