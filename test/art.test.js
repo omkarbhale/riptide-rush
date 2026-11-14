@@ -110,6 +110,47 @@ test('bullet and reflected bullet draw without throwing', () => {
   }
 });
 
+// A mock context that records every colour the bullet paints: fillStyle, strokeStyle and gradient stops.
+function colourRecorder() {
+  const seen = [];
+  const gradient = { addColorStop(_at, c) { seen.push(String(c)); } };
+  const target = { globalAlpha: 1, globalCompositeOperation: 'source-over', lineWidth: 1, strokeStyle: '#000000', fillStyle: '#000000' };
+  const ctx = new Proxy(target, {
+    get(t, p) {
+      if (p in t) return t[p];
+      if (p === 'createRadialGradient' || p === 'createLinearGradient') return () => gradient;
+      return () => {};
+    },
+    set(t, p, v) {
+      if (p === 'fillStyle' || p === 'strokeStyle') seen.push(String(v));
+      t[p] = v;
+      return true;
+    },
+  });
+  return { ctx, seen };
+}
+
+// #143: a reflected bullet is lime in its core, glow and trail, never the player's cyan or enemy amber.
+test('a reflected bullet is lime everywhere, never the player cyan or the enemy amber', () => {
+  const LIME = '141,255,60';   // #8dff3c
+  const CYAN = '60,242,255';   // PALETTE.player
+  const AMBER = '255,179,71';  // PALETTE.bullet
+  const reflected = colourRecorder();
+  draw.bullet(reflected.ctx, 50, 60, 0.5, { reflected: true, vx: -200, vy: 0 });
+  const all = reflected.seen.join(' ');
+  assert.ok(all.includes(LIME), 'lime appears in the glow, ring or trail');
+  assert.ok(!all.includes(CYAN), 'no player cyan');
+  assert.ok(!all.includes(AMBER), 'no enemy amber');
+  assert.ok(!all.includes('234,255,255'), 'the old reflected core (PALETTE.dash) is gone');
+
+  const plain = colourRecorder();
+  draw.bullet(plain.ctx, 50, 60, 0.5, { vx: -200, vy: 0 });
+  const plainAll = plain.seen.join(' ');
+  assert.ok(plainAll.includes(AMBER), 'an enemy bullet stays amber');
+  assert.ok(!plainAll.includes(LIME), 'an enemy bullet is not lime');
+  assert.ok(PALETTE.bullet !== '#8dff3c' && PALETTE.player !== '#8dff3c');
+});
+
 test('a bullet draws a trail only when its velocity is given', () => {
   const plain = mockCtx();
   draw.bullet(plain.ctx, 50, 60, 0.5, {});
