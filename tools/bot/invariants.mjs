@@ -1,8 +1,9 @@
 // Invariant checks for the headless bot harness. After every simulation step the checker looks at the
 // live game and the events that step emitted, and records any rule the sim broke. It never writes to
 // the game. A violation is a bug candidate; an observation is a fact worth reporting that is not a bug.
-import { ARENA, COMBO, DASH, LOGICAL_HEIGHT, LOGICAL_WIDTH, PLAYER, SIM_DT, SPAWN } from '../../src/config.js';
+import { ARENA, COMBO, DASH, LOGICAL_HEIGHT, LOGICAL_WIDTH, PICKUP, PLAYER, SIM_DT, SPAWN } from '../../src/config.js';
 import { ENEMY_KINDS, comboWindowFor, multiplierFor } from '../../src/game.js';
+import { dashMaxCharges } from '../../src/pickups.js';
 
 const W = LOGICAL_WIDTH;
 const H = LOGICAL_HEIGHT;
@@ -31,6 +32,15 @@ export const EVENT_FIELDS = {
   waveClear: ['wave'],
   comboTier: ['tier'],
   comboLost: ['count'],
+  // Added with dash fairness, pickups and modifiers.
+  bulletCut: ['x', 'y'],
+  dashWhiff: ['x', 'y'],
+  enemyShoot: ['x', 'y'],
+  heal: ['x', 'y', 'hp', 'bonus'],
+  pickup: ['x', 'y'],
+  pickupDrop: ['x', 'y'],
+  shieldBreak: ['x', 'y'],
+  modifierEnd: [],
 };
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -91,11 +101,16 @@ export function createChecker(game) {
     }
 
     // Dash state.
+    // The cap is 3, or 4 while Spark Coral is active (dashMaxCharges reads the active modifiers).
     const ch = p.dash.charges;
-    if (!Number.isInteger(ch) || ch < 0 || ch > DASH.maxCharges) flag('DASH_CHARGES_RANGE', t, `charges ${ch}`);
+    const cap = dashMaxCharges(game);
+    if (!Number.isInteger(ch) || ch < 0 || ch > cap) flag('DASH_CHARGES_RANGE', t, `charges ${ch} over cap ${cap}`);
     if (p.dash.active && p.bounce) flag('DASH_AND_BOUNCE_OVERLAP', t, 'dash and bounce both active');
-    if (p.dash.active && (p.dash.active.t < -EPS || p.dash.active.t > DASH.duration + EPS)) {
-      flag('DASH_T_RANGE', t, `dash t ${r3(p.dash.active.t)}`);
+    // Each dash carries its own duration: lunge assist and Frenzy make it longer than DASH.duration,
+    // so the bound is the dash's own dur, never the constant.
+    if (p.dash.active) {
+      const d = p.dash.active;
+      if (!(d.dur > 0) || d.t < -EPS || d.t > d.dur + EPS) flag('DASH_T_RANGE', t, `dash t ${r3(d.t)} of dur ${r3(d.dur)}`);
     }
 
     // Combo.
@@ -219,8 +234,19 @@ export function createChecker(game) {
       }
       killScore += k.points;
     }
-    if (game.score !== st.score + killScore) {
-      flag(game.score < st.score ? 'SCORE_WENT_BACKWARDS' : 'SCORE_CHANGE_NOT_FROM_KILLS', t, `score ${st.score} -> ${game.score}, kills add ${killScore}`);
+    // Score sources: kills, a flat bonus per bullet cut by a dash, and the bonus a heal converts to at full HP.
+    let otherScore = 0;
+    for (const ev of events) {
+      if (ev.type === 'bulletCut') otherScore += DASH.bulletCutScore;
+      if (ev.type === 'heal') {
+        if (!(ev.bonus >= 0)) flag('HEAL_BONUS_INVALID', t, `bonus ${ev.bonus}`);
+        if (ev.bonus > 0 && ev.hp !== PLAYER.maxHp) flag('HEAL_BONUS_BELOW_MAX', t, `bonus ${ev.bonus} at hp ${ev.hp}`);
+        otherScore += ev.bonus;
+      }
+    }
+    const expectedScore = st.score + killScore + otherScore;
+    if (game.score !== expectedScore) {
+      flag(game.score < st.score ? 'SCORE_WENT_BACKWARDS' : 'SCORE_CHANGE_NOT_FROM_KILLS', t, `score ${st.score} -> ${game.score}, expected ${expectedScore}`);
     }
     if (game.combo.count !== running) flag('COMBO_COUNT_MISMATCH', t, `combo ${game.combo.count}, expected ${running}`);
     if (kills.length > 0 && Math.abs(game.combo.timer - comboWindowFor(game.combo.count)) > 1e-9) {
@@ -229,7 +255,13 @@ export function createChecker(game) {
 
     // Damage: exactly one hit point per hurt event, never inside invulnerability, never while dashing.
     if (hurts > 1) flag('MULTIPLE_HITS_IN_STEP', t, `${hurts} hurt events`);
-    if (p.hp !== Math.max(0, st.hp - hurts)) flag('HP_MISMATCH', t, `hp ${st.hp} -> ${p.hp} with ${hurts} hurt`);
+    // HP: replay this step's hurt and heal events in order. A heal with no bonus restored HP.
+    let hpExpect = st.hp;
+    for (const ev of events) {
+      if (ev.type === 'hurt') hpExpect = Math.max(0, hpExpect - 1);
+      if (ev.type === 'heal' && ev.bonus === 0) hpExpect = Math.min(PLAYER.maxHp, hpExpect + PICKUP.heal.restore);
+    }
+    if (p.hp !== hpExpect) flag('HP_MISMATCH', t, `hp ${st.hp} -> ${p.hp}, expected ${hpExpect} (${hurts} hurt)`);
     if (hurts > 0 && t - st.lastHurtAt < PLAYER.invulnAfterHit - SIM_DT) {
       flag('HIT_INSIDE_INVULN', t, `hit ${r3(t - st.lastHurtAt)} s after the previous one`);
     }
