@@ -24,6 +24,10 @@ Dash and pulse presses are buffered for 120 ms, so an early press still fires.
 Enemies: **Drifter** (chases), **Spitter** (keeps range and fires aimed bullets; reflected bullets kill),
 **Charger** (telegraphs for 0.6 s, then lunges in a straight line).
 
+## Play online
+
+**[Play Riptide Rush in your browser](https://omkarbhale.github.io/riptide-rush/)**, deployed from `main` by GitHub Pages.
+
 ## Run locally
 
 No build step and no dependencies. Serve the folder with any static server and open it in a browser:
@@ -38,10 +42,10 @@ The game uses relative URLs only, so it also works under a sub-path (for example
 ## Test
 
 ```sh
-npm test             # node --test test/
+npm test             # node --test
 ```
 
-Tests need Node 20 or newer and use only the built-in runner. `test/game.test.js` covers dash charges and refunds,
+Tests need Node 20 or newer and use only the built-in runner. CI runs them on Node 20, 22 and 24. `test/game.test.js` covers dash charges and refunds,
 swept dash kills, combo and score math, combo expiry, damage and invulnerability, pulse reflection and the perfect
 window, wave escalation, determinism, and a 60-simulated-second soak with random input.
 
