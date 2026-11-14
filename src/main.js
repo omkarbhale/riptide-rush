@@ -1,7 +1,7 @@
 // Boot, fixed-timestep loop, screen state machine, and the wiring between the sim, the effects layer,
 // the sound layer and the renderer. Sim events go to feedback.js and hud.js; this file only handles state
 // changes, input routing and the saved options.
-import { SIM_DT, MAX_FRAME_DT, HIGH_SCORE_KEY, RESTART_GATE, LOGICAL_WIDTH, LOGICAL_HEIGHT } from './config.js';
+import { SIM_DT, MAX_FRAME_DT, LOGICAL_WIDTH, LOGICAL_HEIGHT } from './config.js';
 import { createGame, update, drainEvents } from './game.js';
 import { createInput } from './input.js';
 import { drawFrame, currentZoom } from './render.js';
@@ -9,19 +9,26 @@ import { createFx, FX_QUALITY_BURST_SCALE } from './fx.js';
 import { audio } from './audio.js';
 import { createFeedback } from './feedback.js';
 import {
+  HOWTO_CARDS,
   OPTION_ROWS,
+  SUMMARY_GATE,
   activateSetting,
   computeLayout,
   createHud,
   hudEvents,
   hudUpdate,
+  howtoHit,
+  loadHowtoSeen,
   loadSettings,
   pauseHit,
+  runRecord,
+  saveHowtoSeen,
   saveSettings,
   setVolume,
   stepSetting,
   trackFraction,
 } from './hud.js';
+import { loadScores, recordRun, saveScores, topScore } from './scores.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -35,14 +42,19 @@ function storage() {
   }
 }
 
-// screen: 'title' | 'playing' | 'paused' | 'over'
+// screen: 'title' | 'howto' | 'playing' | 'paused' | 'over'
 const app = {
   screen: 'title',
   game: createGame(newSeed()),
   hud: createHud(),
-  highScore: loadHighScore(),
+  scores: loadScores(storage()), // the top five runs (scores.js)
+  highScore: 0,
   newBest: false,
+  runRank: -1, // where the last run landed on the top five, -1 when it did not make it
   overAge: 0,
+  howtoSeen: loadHowtoSeen(storage()),
+  howtoIndex: 0,
+  howtoFrom: 'title', // the screen the how-to was opened from: 'title' (first run) or 'paused'
   settings: loadSettings(storage()),
   menuRow: 0, // the option under the keyboard cursor on the pause screen
   layout: computeLayout(window.innerWidth, window.innerHeight),
@@ -57,22 +69,8 @@ function newSeed() {
   return (Math.floor(Math.random() * 0x7fffffff) ^ Date.now()) >>> 0;
 }
 
-// localStorage can be missing or throw (private windows, blocked storage); the game still works.
-function loadHighScore() {
-  try {
-    return Number(window.localStorage.getItem(HIGH_SCORE_KEY)) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveHighScore(value) {
-  try {
-    window.localStorage.setItem(HIGH_SCORE_KEY, String(value));
-  } catch {
-    // keep the best score in memory for this page only
-  }
-}
+// The best score is the top of the top-five list (scores.js); blocked storage keeps it for this page only.
+app.highScore = topScore(app.scores);
 
 // Audio is created on the first user gesture (browsers refuse an AudioContext before one).
 // Until then audio calls are silent no-ops, so the saved volume and mute are applied again once it exists.
@@ -124,16 +122,30 @@ function mapPoint(clientX, clientY) {
 // A left click inside the pause options panel is handled here and never resumes the game. A click
 // outside the panel is not claimed, so it resumes as before.
 function claimPointer(button, clientX, clientY) {
-  if (app.screen !== 'paused' || button !== 0) return false;
+  if (button !== 0) return false;
   const p = cssPoint(clientX, clientY);
+  // The how-to's Skip button is the only click it claims; other clicks advance a card as usual.
+  if (app.screen === 'howto') {
+    if (howtoHit(app.layout, p.x, p.y) !== 'skip') return false;
+    closeHowto();
+    return true;
+  }
+  if (app.screen !== 'paused') return false;
   const hit = pauseHit(app.layout, p.x, p.y);
   if (!hit) return false;
   if (hit.row !== null) {
     app.menuRow = hit.row;
     if (hit.part === 'track') changeSettings(setVolume(app.settings, trackFraction(app.layout, p.x)));
-    else changeSettings(activateSetting(app.settings, OPTION_ROWS[hit.row]));
+    else activateMenuRow(hit.row);
   }
   return true;
+}
+
+// Enter or a click on a pause-menu row: the how-to row opens the cards, the rest change a setting.
+function activateMenuRow(i) {
+  const row = OPTION_ROWS[i];
+  if (row === 'howto') openHowto('paused');
+  else changeSettings(activateSetting(app.settings, row));
 }
 
 function startRun() {
@@ -141,10 +153,31 @@ function startRun() {
   app.hud = createHud();
   app.screen = 'playing';
   app.newBest = false;
+  app.runRank = -1;
   app.overAge = 0;
   app.acc = 0;
   input.reset();
   feedback.startRun();
+}
+
+// The how-to cards: from the title on the first run, or from the pause menu at any time.
+function openHowto(from) {
+  app.howtoFrom = from;
+  app.howtoIndex = 0;
+  app.screen = 'howto';
+  input.reset();
+}
+
+// Leaves the cards (finished or skipped). The first run goes straight into play; from the pause menu it
+// returns to the pause screen.
+function closeHowto() {
+  if (!app.howtoSeen) {
+    app.howtoSeen = true;
+    saveHowtoSeen(storage());
+  }
+  input.reset();
+  if (app.howtoFrom === 'title') startRun();
+  else app.screen = 'paused';
 }
 
 function pause() {
@@ -161,21 +194,34 @@ function resume() {
   feedback.setPaused(false);
 }
 
-function endRun(score) {
+// The run goes onto the top-five list, which is saved at once. The summary reads the rank and the new best.
+function endRun() {
   app.screen = 'over';
   app.overAge = 0;
-  if (score > app.highScore) {
-    app.highScore = score;
-    app.newBest = true;
-    saveHighScore(score);
-  }
+  const r = recordRun(app.scores, runRecord(app.game, app.hud, Date.now()));
+  app.scores = r.scores;
+  app.runRank = r.rank;
+  app.newBest = r.newBest;
+  app.highScore = topScore(r.scores);
+  saveScores(storage(), r.scores);
   input.reset();
 }
 
 function handleAction(action) {
   switch (app.screen) {
     case 'title':
-      if (action === 'confirm' || action === 'select') startRun();
+      if (action === 'confirm' || action === 'select') {
+        if (app.howtoSeen) startRun();
+        else openHowto('title');
+      }
+      break;
+    case 'howto':
+      // Esc or P skips at once. Confirm, Enter or Right moves on; after the last card it closes.
+      if (action === 'pause') closeHowto();
+      else if (action === 'confirm' || action === 'select' || action === 'right') {
+        if (app.howtoIndex < HOWTO_CARDS.length - 1) app.howtoIndex += 1;
+        else closeHowto();
+      } else if (action === 'left') app.howtoIndex = Math.max(0, app.howtoIndex - 1);
       break;
     case 'playing':
       if (action === 'pause') pause();
@@ -187,10 +233,10 @@ function handleAction(action) {
       else if (action === 'down') app.menuRow = (app.menuRow + 1) % OPTION_ROWS.length;
       else if (action === 'left' || action === 'right') {
         changeSettings(stepSetting(app.settings, OPTION_ROWS[app.menuRow], action === 'left' ? -1 : 1));
-      } else if (action === 'select') changeSettings(activateSetting(app.settings, OPTION_ROWS[app.menuRow]));
+      } else if (action === 'select') activateMenuRow(app.menuRow);
       break;
     case 'over':
-      if ((action === 'confirm' || action === 'select') && app.overAge >= RESTART_GATE) startRun();
+      if ((action === 'confirm' || action === 'select') && app.overAge >= SUMMARY_GATE) startRun();
       break;
     default:
       break;
@@ -220,14 +266,17 @@ function simStep() {
   if (app.screen !== 'playing') return;
   update(app.game, input.snapshot(), SIM_DT);
   const events = drainEvents(app.game);
+  let ended = false;
   for (const ev of events) {
     // A dash or pulse has fired: clear its buffered press so it cannot fire twice.
     if (ev.type === 'dash') input.consume('dash');
     else if (ev.type === 'pulse') input.consume('pulse');
-    else if (ev.type === 'gameOver') endRun(ev.score);
+    else if (ev.type === 'gameOver') ended = true;
     else if (ev.type === 'kill') feelKill(ev);
   }
   hudEvents(app.hud, events, app.game);
+  // The run is recorded after this step's HUD tallies, so its last kills count toward the summary.
+  if (ended) endRun();
   feedback.handleStep(events, app.game);
 }
 
@@ -301,6 +350,9 @@ function frame(now) {
     dt: live ? dt : 0,
     highScore: app.highScore,
     newBest: app.newBest,
+    runRank: app.runRank,
+    scores: app.scores,
+    howtoIndex: app.howtoIndex,
     overAge: app.overAge,
     muted: app.settings.muted,
     fx,

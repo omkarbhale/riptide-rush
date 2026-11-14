@@ -40,6 +40,17 @@ export const PALETTE = Object.freeze({
   splitter: '#ffe066',
   mini: '#ff9a4a',
   mine: '#ff3d81',
+  puffer: '#ff9ed8',
+  shieldbearer: '#3ee6b0',
+  inksquid: '#8a4dff',
+  phaseeel: '#ffd6a0',
+  warden: '#a8233f',
+  wardenPhase2: '#ff5a2a',
+  wardenLure: '#ffe066',
+  // Ink puddles and lob shadows: near-black violet with a light rim, unlike the Tidal Current arrows.
+  ink: '#1c0b38',
+  inkRim: '#c79bff',
+  barrier: '#f2fbff',
 });
 
 const ENEMY_COLOR = Object.freeze({
@@ -50,7 +61,15 @@ const ENEMY_COLOR = Object.freeze({
   splitter: PALETTE.splitter,
   mini: PALETTE.mini,
   mine: PALETTE.mine,
+  puffer: PALETTE.puffer,
+  shieldbearer: PALETTE.shieldbearer,
+  inksquid: PALETTE.inksquid,
+  phaseeel: PALETTE.phaseeel,
+  warden: PALETTE.warden,
 });
+
+// The boss is four enemy sizes across (issue #38: radius 60 px against 14 px nominal).
+const WARDEN_SIZE = 4;
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -75,6 +94,13 @@ function readOpts(o) {
     invulnerable: !!o.invulnerable,
     charges: o.charges,
     reflected: !!o.reflected,
+    // Per-type state (all optional, with safe defaults):
+    inflate: clamp01(num(o.inflate, 0)), // puffer swell, 0..1
+    aura: Math.max(0, num(o.aura, 120)), // shield bearer aura radius, local units
+    barrier: clamp01(num(o.barrier, 0)), // barrier ring on a protected enemy, 0..1
+    visibility: clamp01(num(o.visibility, 1)), // phase eel, 0 hidden .. 1 visible
+    phase: o.phase === 2 ? 2 : 1, // warden phase
+    vulnerable: clamp01(num(o.vulnerable, 0)), // warden weak-point glow, 0..1
   };
 }
 
@@ -178,12 +204,14 @@ function neonBody(ctx, build, color, glow) {
 // (8 levels), rotated to animate the dashes and faded by alpha for the strobe.
 const WARN_LEVELS = 8;
 const WARN_HALF = 30; // sprite covers [-30, 30] local units
-const WARN_RES = 3;
-function warnRingSprite(level) {
-  return cachedLayer('warn:' + level, WARN_HALF * 2 * WARN_RES, WARN_HALF * 2 * WARN_RES, (g) => {
+// The ring is baked at the device resolution of the enemy it sits on (`res`), not a fixed 3x, which
+// was downsampled on every draw at typical device scales.
+function warnRingSprite(level, res) {
+  const px = Math.ceil(WARN_HALF * 2 * res);
+  return cachedLayer('warn:' + level + ':' + res, px, px, (g) => {
     const tg = level / WARN_LEVELS;
     const r = R * (2.0 - 0.7 * tg);
-    g.setTransform(WARN_RES, 0, 0, WARN_RES, WARN_HALF * WARN_RES, WARN_HALF * WARN_RES);
+    g.setTransform(res, 0, 0, res, px / 2, px / 2);
     g.setLineDash([3, 4]);
     g.beginPath();
     g.arc(0, 0, r, 0, TAU);
@@ -193,11 +221,26 @@ function warnRingSprite(level) {
   });
 }
 
-function warnRing(ctx, t, tg) {
+// `size` is the enemy's size multiple. Anything bigger than a standard enemy gets a live ring at its own radius.
+function warnRing(ctx, t, tg, size) {
   const level = Math.max(1, Math.min(WARN_LEVELS, Math.round(tg * WARN_LEVELS)));
   const strobe = 0.5 + 0.5 * Math.sin(t * (14 + 24 * tg));
+  if (size !== undefined && size !== 1) {
+    const big = R * size * (2.0 - 0.7 * tg);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.setLineDash([6, 8]);
+    ctx.lineDashOffset = -t * 40;
+    ctx.beginPath();
+    ctx.arc(0, 0, big, 0, TAU);
+    ctx.strokeStyle = rgba(PALETTE.danger, tg * (0.25 + 0.6 * strobe));
+    ctx.lineWidth = 2 + 2 * tg;
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
   const r = R * (2.0 - 0.7 * (level / WARN_LEVELS));
-  const sprite = warnRingSprite(level);
+  const sprite = warnRingSprite(level, curRes);
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   if (sprite) {
@@ -520,12 +563,21 @@ function drawPlayer(ctx, x, y, angle, t, opts) {
 // is never downsampled per draw. Flash and telegraph states are baked in at quantised levels.
 const SPRITE_HX = 1.7 * R;
 const SPRITE_HY = 1.2 * R;
+const DEFAULT_BOX = Object.freeze({ hx: SPRITE_HX, hy: SPRITE_HY });
+const W = R * WARDEN_SIZE; // warden geometry unit (its body is drawn at this size)
+// Longer or larger types get their own box, so their baked sprite still covers the whole silhouette.
+const BOX = new Map([
+  ['phaseeel', Object.freeze({ hx: 2.4 * R, hy: 1.2 * R })],
+  ['warden', Object.freeze({ hx: 1.6 * W, hy: 1.2 * W })],
+]);
 const SPRITE_MAX_RES = 4;
 const FLASH_LEVELS = 2; // flash 0, 0.5, 1
 const TELE_LEVELS = 4; // telegraph 0, 0.25, ... 1
 
+// Sprite resolution in pixels per local unit, rounded up to half steps. Whole steps oversampled by up to
+// 2x at fractional device scales (1.5x was 2x), and every blit then downsampled the extra pixels.
 function spriteRes(v) {
-  return Math.min(SPRITE_MAX_RES, Math.max(1, Math.ceil(v - 1e-6)));
+  return Math.min(SPRITE_MAX_RES, Math.max(0.5, Math.ceil(v * 2 - 1e-6) / 2));
 }
 
 // Drifter tendrils are baked for this many phases of their sin(4t) wobble.
@@ -714,13 +766,15 @@ function tendrilsPaint(a) {
 
 // Resolution of the enemy currently being drawn (set by draw.enemy before its type function runs).
 let curRes = 1;
+// Sprite box of the enemy currently being drawn (set by draw.enemy alongside curRes).
+let curBox = DEFAULT_BOX;
 
 // Sprite for one paint at resolution `res`, with flash level `f` and telegraph level `g` baked in.
 // Level 0 is the plain paint. Overlays recolour the plain sprite (white for flash, danger for telegraph)
 // and draw it over, in the same order the live path used. Each combination is built once, lazily.
 function variantLayer(id, colour, paint, res, f, g) {
-  const w = Math.ceil(2 * SPRITE_HX * res);
-  const h = Math.ceil(2 * SPRITE_HY * res);
+  const w = Math.ceil(2 * curBox.hx * res);
+  const h = Math.ceil(2 * curBox.hy * res);
   return cachedLayer('enemy:' + id + ':' + res + ':' + f + ':' + g, w, h, (out) => {
     if (f === 0 && g === 0) {
       out.setTransform(res, 0, 0, res, w / 2, h / 2);
@@ -749,8 +803,8 @@ function variantLayer(id, colour, paint, res, f, g) {
 
 // Draws a sprite centred on the enemy origin, in the enemy's local units.
 function blitSprite(ctx, layer, res) {
-  const dw = Math.ceil(2 * SPRITE_HX * res) / res;
-  const dh = Math.ceil(2 * SPRITE_HY * res) / res;
+  const dw = Math.ceil(2 * curBox.hx * res) / res;
+  const dh = Math.ceil(2 * curBox.hy * res) / res;
   ctx.globalCompositeOperation = 'source-over';
   ctx.drawImage(layer, -dw / 2, -dh / 2, dw, dh);
 }
@@ -906,6 +960,382 @@ function drawMine(ctx, t, o) {
   ctx.restore();
 }
 
+// Puffer (#19): a round body with twelve spines. `lv` 0..3 is the swell level: the body grows,
+// the spines spread and the body lightens. Each level is its own baked sprite.
+function pufferPaint(lv) {
+  return (g, c) => {
+    const k = lv / 3;
+    // A fuller balloon with nine short, broad spines: told apart from the mine's thin radial spikes.
+    const rb = R * (1.0 + 0.3 * k);
+    const len = R * (0.3 + 0.22 * k);
+    neonBody(
+      g,
+      (p) => {
+        for (let i = 0; i < 9; i++) {
+          const a = (i * TAU) / 9;
+          const half = 0.2;
+          p.moveTo(Math.cos(a - half) * rb * 0.95, Math.sin(a - half) * rb * 0.95);
+          p.lineTo(Math.cos(a) * (rb + len), Math.sin(a) * (rb + len));
+          p.lineTo(Math.cos(a + half) * rb * 0.95, Math.sin(a + half) * rb * 0.95);
+          p.closePath();
+        }
+      },
+      c,
+      1
+    );
+    neonBody(g, (p) => p.arc(0, 0, rb, 0, TAU), mixHex(c, '#ffffff', 0.25 * k), 1);
+    g.fillStyle = PALETTE.deepTop;
+    g.beginPath();
+    g.arc(rb * 0.42, -rb * 0.2, R * 0.24, 0, TAU);
+    g.fill();
+    g.fillStyle = rgba('#ffffff', 0.95);
+    g.beginPath();
+    g.arc(rb * 0.5, -rb * 0.28, R * 0.09, 0, TAU);
+    g.fill();
+  };
+}
+
+function drawPuffer(ctx, t, o) {
+  const lv = Math.round(o.inflate * 3);
+  drawLayer(ctx, 'puffer.' + lv, ENEMY_COLOR.puffer, pufferPaint(lv), o);
+}
+
+// Shield Bearer (#20): a heater-shield hull, pointed forward, with a bright plate across its front.
+function shieldBearerPaint(g, c) {
+  neonBody(
+    g,
+    (p) => {
+      p.moveTo(-R * 1.25, -R * 1.05);
+      p.lineTo(R * 0.8, -R * 1.05);
+      p.quadraticCurveTo(R * 1.6, -R * 0.9, R * 1.65, 0);
+      p.quadraticCurveTo(R * 1.6, R * 0.9, R * 0.8, R * 1.05);
+      p.lineTo(-R * 1.25, R * 1.05);
+      p.quadraticCurveTo(-R * 1.55, 0, -R * 1.25, -R * 1.05);
+      p.closePath();
+    },
+    c,
+    1
+  );
+  g.strokeStyle = rgba('#ffffff', 0.85);
+  g.lineWidth = 2.2;
+  g.beginPath();
+  g.arc(R * 0.55, 0, R * 1.05, -0.8, 0.8);
+  g.stroke();
+  g.fillStyle = PALETTE.deepTop;
+  g.beginPath();
+  g.arc(-R * 0.2, 0, R * 0.3, 0, TAU);
+  g.fill();
+  g.fillStyle = rgba('#ffffff', 0.8);
+  g.beginPath();
+  g.arc(-R * 0.2, 0, R * 0.1, 0, TAU);
+  g.fill();
+}
+
+function drawShieldBearer(ctx, t, o) {
+  drawLayer(ctx, 'shieldbearer', ENEMY_COLOR.shieldbearer, shieldBearerPaint, o);
+}
+
+// Aura (#20): a faint disc and ring at opts.aura radius, drawn under the Bearer. Live, not baked, since the radius varies.
+function drawAura(ctx, o) {
+  if (o.aura <= 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = rgba(ENEMY_COLOR.shieldbearer, 0.05);
+  ctx.beginPath();
+  ctx.arc(0, 0, o.aura, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = rgba(ENEMY_COLOR.shieldbearer, 0.35);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Barrier (#20): four bright arcs on a ring outside any enemy it protects. Turns slowly.
+// Its colour and broken segments keep it apart from the Shellback's solid plate.
+function drawBarrier(ctx, t, b, size) {
+  const r = R * (size || 1) * 1.9;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = 2.2;
+  ctx.strokeStyle = rgba(PALETTE.barrier, 0.35 + 0.55 * b);
+  for (let i = 0; i < 4; i++) {
+    const a0 = t * 1.2 + (i * TAU) / 4;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, a0, a0 + TAU / 4 - 0.35);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Ink Squid (#22): a pointed mantle with fins, a trailing set of tentacles at the head, and a glowing ink sac.
+function inkSquidPaint(g, c) {
+  const tail = (sign) => (p) => {
+    p.moveTo(-R * 0.7, sign * R * 0.35);
+    p.lineTo(-R * 1.5, sign * R * 1.05);
+    p.lineTo(-R * 1.2, sign * R * 0.05);
+    p.closePath();
+  };
+  neonBody(
+    g,
+    (p) => {
+      p.moveTo(R * 1.0, 0);
+      p.quadraticCurveTo(R * 0.7, -R * 0.75, -R * 0.2, -R * 0.6);
+      p.lineTo(-R * 1.6, 0);
+      p.lineTo(-R * 0.2, R * 0.6);
+      p.quadraticCurveTo(R * 0.7, R * 0.75, R * 1.0, 0);
+      p.closePath();
+    },
+    c,
+    1
+  );
+  neonBody(g, tail(-1), c, 0.8);
+  neonBody(g, tail(1), c, 0.8);
+
+  g.strokeStyle = rgba(mixHex(c, '#ffffff', 0.4), 0.85);
+  g.lineWidth = 1.2;
+  g.lineCap = 'round';
+  g.beginPath();
+  for (let i = -2; i <= 1; i++) {
+    const oy = (i + 0.5) * R * 0.3;
+    g.moveTo(R * 0.7, oy);
+    g.quadraticCurveTo(R * 1.1, oy * 0.6, R * 1.5, oy + (i < 0 ? -1 : 1) * R * 0.25);
+  }
+  g.stroke();
+
+  g.fillStyle = PALETTE.deepTop;
+  g.beginPath();
+  g.arc(R * 0.3, -R * 0.22, R * 0.2, 0, TAU);
+  g.fill();
+  g.fillStyle = rgba('#ffffff', 0.9);
+  g.beginPath();
+  g.arc(R * 0.36, -R * 0.27, R * 0.07, 0, TAU);
+  g.fill();
+
+  g.globalCompositeOperation = 'lighter';
+  g.fillStyle = rgba(PALETTE.inkRim, 0.7);
+  g.beginPath();
+  g.arc(-R * 0.3, 0, R * 0.22, 0, TAU);
+  g.fill();
+}
+
+function drawInkSquid(ctx, t, o) {
+  drawLayer(ctx, 'inksquid', ENEMY_COLOR.inksquid, inkSquidPaint, o);
+}
+
+// Phase Eel (#24): a tapering serpent with a head at +x. `p8` is one of eight wiggle phases, baked per phase.
+const EEL_SAMPLES = 16;
+function eelCentre(s, ph) {
+  return [-2.0 * R + 3.6 * R * s, Math.sin(s * 5.2 - ph) * R * 0.42 * (1 - 0.5 * s)];
+}
+
+function eelPaint(p8) {
+  const ph = (p8 / 8) * TAU;
+  return (g, c) => {
+    const top = [];
+    const bot = [];
+    for (let i = 0; i <= EEL_SAMPLES; i++) {
+      const s = i / EEL_SAMPLES;
+      const [x, y] = eelCentre(s, ph);
+      const [xa, ya] = eelCentre(Math.max(0, s - 0.02), ph);
+      const [xb, yb] = eelCentre(Math.min(1, s + 0.02), ph);
+      const dx = xb - xa;
+      const dy = yb - ya;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+      const w = R * (0.16 + 0.3 * Math.pow(s, 0.8));
+      top.push([x + nx * w, y + ny * w]);
+      bot.push([x - nx * w, y - ny * w]);
+    }
+    neonBody(
+      g,
+      (p) => {
+        p.moveTo(top[0][0], top[0][1]);
+        for (let i = 1; i < top.length; i++) p.lineTo(top[i][0], top[i][1]);
+        for (let i = bot.length - 1; i >= 0; i--) p.lineTo(bot[i][0], bot[i][1]);
+        p.closePath();
+      },
+      c,
+      1
+    );
+    // Dorsal ridge: a row of small fins along the back.
+    g.strokeStyle = rgba(mixHex(c, '#ffffff', 0.5), 0.8);
+    g.lineWidth = 1;
+    g.beginPath();
+    for (let i = 4; i < EEL_SAMPLES; i += 2) {
+      g.moveTo(top[i][0], top[i][1]);
+      g.lineTo((top[i][0] + top[i + 1][0]) / 2 - R * 0.05, (top[i][1] + top[i + 1][1]) / 2 - R * 0.35);
+      g.lineTo(top[i + 1][0], top[i + 1][1]);
+    }
+    g.stroke();
+    const [hx, hy] = eelCentre(0.86, ph);
+    g.fillStyle = PALETTE.deepTop;
+    g.beginPath();
+    g.arc(hx + R * 0.12, hy - R * 0.1, R * 0.16, 0, TAU);
+    g.fill();
+  };
+}
+
+function drawPhaseEel(ctx, t, o) {
+  // Hidden eels (visibility 0) are not drawn; their ripple is.
+  if (o.visibility > 0) {
+    const cycle = ((t * 5) % TAU + TAU) % TAU;
+    const p = Math.round((cycle / TAU) * 8) % 8;
+    ctx.save();
+    ctx.globalAlpha = o.visibility;
+    drawLayer(ctx, 'phaseeel.' + p, ENEMY_COLOR.phaseeel, eelPaint(p), o);
+    ctx.restore();
+  }
+  if (o.telegraph > 0) {
+    // The surfacing ripple: two rings widening out of the eel's position, and a faint splash at its centre.
+    const tg = o.telegraph;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 1.5;
+    const f = (t * 2) % 1;
+    for (let j = 0; j < 2; j++) {
+      const frac = (f + j * 0.5) % 1;
+      ctx.strokeStyle = rgba(PALETTE.phaseeel, (1 - frac) * tg * 0.9);
+      ctx.beginPath();
+      ctx.arc(0, 0, R * (1.2 + 2.0 * frac), 0, TAU);
+      ctx.stroke();
+    }
+    ctx.fillStyle = rgba(PALETTE.phaseeel, 0.3 * tg);
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 0.7, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Anglerfish Warden (#38): a four-size boss. Its geometry is in units of W (4R), facing +x.
+// `ph` 1 is a dark crimson body; `ph` 2 adds a dorsal crest, a crack pattern and a hotter colour.
+function wardenPaint(ph) {
+  return (g, c) => {
+    neonBody(
+      g,
+      (p) => {
+        p.moveTo(W * 1.0, 0);
+        p.quadraticCurveTo(W * 0.9, -W * 0.85, 0, -W * 0.85);
+        p.quadraticCurveTo(-W * 0.9, -W * 0.6, -W * 1.45, -W * 0.1);
+        p.lineTo(-W * 1.5, W * 0.1);
+        p.quadraticCurveTo(-W * 0.9, W * 0.6, 0, W * 0.85);
+        p.quadraticCurveTo(W * 0.9, W * 0.85, W * 1.0, 0);
+        p.closePath();
+      },
+      c,
+      1.4
+    );
+    if (ph === 2) {
+      // Dorsal crest: long spikes along the back.
+      neonBody(
+        g,
+        (p) => {
+          const xs = [0.3, 0.0, -0.3, -0.6, -0.9];
+          for (const x of xs) {
+            const base = x > 0 ? -0.8 : -0.62;
+            p.moveTo(W * (x - 0.08), W * base);
+            p.lineTo(W * x, W * (base - 0.34));
+            p.lineTo(W * (x + 0.08), W * base);
+            p.closePath();
+          }
+        },
+        c,
+        1
+      );
+      g.strokeStyle = rgba(PALETTE.deepTop, 0.6);
+      g.lineWidth = 1.5;
+      g.beginPath();
+      g.moveTo(-W * 0.3, -W * 0.5);
+      g.lineTo(-W * 0.1, -W * 0.2);
+      g.lineTo(-W * 0.45, W * 0.1);
+      g.moveTo(-W * 0.1, -W * 0.2);
+      g.lineTo(W * 0.15, -W * 0.45);
+      g.stroke();
+    }
+    // Jaw: a light mouth line with teeth.
+    g.strokeStyle = rgba('#fff4e0', 0.8);
+    g.lineWidth = 1.6;
+    g.beginPath();
+    g.moveTo(W * 0.1, W * 0.1);
+    g.lineTo(W * 0.98, W * 0.04);
+    g.stroke();
+    g.fillStyle = rgba('#fff4e0', 0.95);
+    g.beginPath();
+    for (const x of [0.42, 0.57, 0.72, 0.87]) {
+      g.moveTo(W * (x - 0.05), W * 0.1);
+      g.lineTo(W * x, W * 0.02);
+      g.lineTo(W * (x + 0.05), W * 0.1);
+      g.closePath();
+    }
+    g.fill();
+    // Eye, with a dark pupil.
+    g.fillStyle = PALETTE.wardenLure;
+    g.beginPath();
+    g.arc(W * 0.42, -W * 0.3, W * 0.13, 0, TAU);
+    g.fill();
+    g.fillStyle = PALETTE.deepTop;
+    g.beginPath();
+    g.arc(W * 0.45, -W * 0.3, W * 0.05, 0, TAU);
+    g.fill();
+    // Lure: a stalk arcing forward to a bulb. The glow over the bulb is drawn live in drawWarden.
+    g.strokeStyle = rgba(mixHex(c, '#ffffff', 0.3), 0.9);
+    g.lineWidth = 2.2;
+    g.beginPath();
+    g.moveTo(W * 0.55, -W * 0.75);
+    g.quadraticCurveTo(W * 0.9, -W * 1.1, W * 1.22, -W * 1.02);
+    g.stroke();
+    g.fillStyle = PALETTE.wardenLure;
+    g.beginPath();
+    g.arc(W * 1.28, -W * 1.0, W * 0.1, 0, TAU);
+    g.fill();
+  };
+}
+
+function drawWarden(ctx, t, o) {
+  const ph = o.phase;
+  const color = ph === 2 ? PALETTE.wardenPhase2 : ENEMY_COLOR.warden;
+  drawLayer(ctx, 'warden.' + ph, color, wardenPaint(ph), o);
+
+  // Lure glow: pulses over the bulb, always on.
+  const pulse = 0.5 + 0.5 * Math.sin(t * 4);
+  const lx = W * 1.28;
+  const ly = -W * 1.0;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = rgba(PALETTE.wardenLure, 0.1 + 0.08 * pulse);
+  ctx.beginPath();
+  ctx.arc(lx, ly, W * (0.42 + 0.06 * pulse), 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = rgba(PALETTE.wardenLure, 0.22 + 0.12 * pulse);
+  ctx.beginPath();
+  ctx.arc(lx, ly, W * 0.24, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = rgba('#ffffff', 0.7 + 0.3 * pulse);
+  ctx.beginPath();
+  ctx.arc(lx, ly, W * 0.09, 0, TAU);
+  ctx.fill();
+
+  // Weak point: a dim core, which flares during the 0.6 s window when `vulnerable` rises toward 1.
+  const v = o.vulnerable;
+  const wx = -W * 0.25;
+  ctx.fillStyle = rgba(PALETTE.wardenLure, 0.12 + 0.6 * v);
+  ctx.beginPath();
+  ctx.arc(wx, 0, W * (0.2 + 0.12 * v), 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = rgba(PALETTE.wardenLure, 0.25 + 0.7 * v);
+  ctx.lineWidth = 1.5 + 2 * v;
+  ctx.beginPath();
+  ctx.arc(wx, 0, W * (0.3 + 0.08 * v), 0, TAU);
+  ctx.stroke();
+  ctx.fillStyle = rgba('#ffffff', 0.15 + 0.7 * v);
+  ctx.beginPath();
+  ctx.arc(wx, 0, W * 0.07, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
 const ENEMY_DRAW = new Map([
   ['drifter', drawDrifter],
   ['spitter', drawSpitter],
@@ -914,7 +1344,84 @@ const ENEMY_DRAW = new Map([
   ['splitter', drawSplitter],
   ['mini', drawMini],
   ['mine', drawMine],
+  ['puffer', drawPuffer],
+  ['shieldbearer', drawShieldBearer],
+  ['inksquid', drawInkSquid],
+  ['phaseeel', drawPhaseEel],
+  ['warden', drawWarden],
 ]);
+
+// Types that draw their own telegraph instead of the generic dashed ring.
+const OWN_TELEGRAPH = new Set(['phaseeel']);
+// Size multiples for types drawn larger than a standard enemy.
+const ENEMY_SIZE = new Map([['warden', WARDEN_SIZE]]);
+
+// Ink hazards (#22), drawn by draw.hazard. Puddle: a wobbling dark pool with a light rim.
+function drawPuddle(ctx, x, y, r, t, life) {
+  const a = clamp01(life);
+  const N = 20;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const ang = (i / N) * TAU;
+    const k = 1 + 0.09 * Math.sin(ang * 3 + t * 1.3) + 0.05 * Math.sin(ang * 5 - t * 0.9);
+    const px = Math.cos(ang) * r * k;
+    const py = Math.sin(ang) * r * k;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.fillStyle = rgba(PALETTE.ink, 0.62 * a);
+  ctx.fill();
+  ctx.strokeStyle = rgba(PALETTE.inkRim, 0.55 * a);
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = rgba('#ffffff', 0.08 * a);
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const ang = t * 0.4 + (i * TAU) / 3;
+    ctx.moveTo(Math.cos(ang) * r * 0.45 + r * 0.12, Math.sin(ang) * r * 0.35);
+    ctx.arc(Math.cos(ang) * r * 0.45, Math.sin(ang) * r * 0.35, r * 0.1, 0, TAU);
+  }
+  ctx.fill();
+  ctx.restore();
+}
+
+// Lob shadow: a faint landing disc that fills in over the flight, inside a dashed-looking outer ring at the full radius.
+function drawLobShadow(ctx, x, y, r, progress) {
+  const k = clamp01(progress);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  ctx.arc(0, 0, r * (0.35 + 0.65 * k), 0, TAU);
+  ctx.fillStyle = rgba(PALETTE.ink, 0.35 + 0.3 * k);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, TAU);
+  ctx.strokeStyle = rgba(PALETTE.inkRim, 0.35 + 0.5 * k);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The lob in flight: a dark blob with a light rim. It grows with its height above the ground.
+function drawInkBlob(ctx, x, y, r, t, height) {
+  const size = r * (1 + 0.35 * clamp01(height)) * (1 + 0.05 * Math.sin(t * 10));
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  ctx.arc(0, 0, size, 0, TAU);
+  ctx.fillStyle = PALETTE.ink;
+  ctx.fill();
+  ctx.strokeStyle = PALETTE.inkRim;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(-size * 0.3, -size * 0.3, size * 0.25, 0, TAU);
+  ctx.fillStyle = rgba('#ffffff', 0.35);
+  ctx.fill();
+  ctx.restore();
+}
 
 // ---------------------------------------------------------------------------
 // public interface
@@ -958,12 +1465,34 @@ export const draw = {
     const o = readOpts(opts);
     const time = num(t, 0);
     curRes = spriteRes(scaleOf(ctx).sx * o.scale);
+    curBox = BOX.get(type) || DEFAULT_BOX;
+    const size = ENEMY_SIZE.get(type);
     ctx.save();
     ctx.translate(num(x, 0), num(y, 0));
     ctx.rotate(num(angle, 0));
     ctx.scale(o.scale, o.scale);
+    if (type === 'shieldbearer') drawAura(ctx, o);
     fn(ctx, time, o);
-    if (o.telegraph > 0) warnRing(ctx, time, o.telegraph);
+    if (o.telegraph > 0 && !OWN_TELEGRAPH.has(type)) warnRing(ctx, time, o.telegraph, size);
+    if (o.barrier > 0) drawBarrier(ctx, time, o.barrier, size);
+    ctx.restore();
+  },
+
+  // Ink hazards (#22). kind: 'puddle' (opts.life 0..1 fades it), 'shadow' (a lob's landing disc,
+  // opts.progress 0..1 grows it over the flight), or 'lob' (the blob in flight, opts.height 0..1).
+  // Unknown kinds draw nothing.
+  hazard(ctx, kind, x, y, radius, t, opts) {
+    if (kind !== 'puddle' && kind !== 'shadow' && kind !== 'lob') return;
+    const r = Math.max(0, num(radius, 0));
+    if (!(r > 0)) return;
+    const px = num(x, 0);
+    const py = num(y, 0);
+    const time = num(t, 0);
+    const o = opts || {};
+    ctx.save();
+    if (kind === 'puddle') drawPuddle(ctx, px, py, r, time, num(o.life, 1));
+    else if (kind === 'shadow') drawLobShadow(ctx, px, py, r, num(o.progress, 1));
+    else drawInkBlob(ctx, px, py, r, time, num(o.height, 0));
     ctx.restore();
   },
 

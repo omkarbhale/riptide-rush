@@ -264,3 +264,77 @@ test('darkenAt is live for its duration, then gone; a bad alpha is clamped', () 
   fx.update(0.11);
   assert.equal(fx.getDarken(), null, 'gone after its duration');
 });
+
+// A context that records the centre of every arc() call, which is where the dot-shaped particles are drawn.
+function arcRecorder() {
+  const arcs = [];
+  const ctx = new Proxy({}, {
+    get(t, key) {
+      if (key in t) return t[key];
+      if (key === 'createRadialGradient') return () => ({ addColorStop() {} });
+      if (key === 'arc') return (x, y) => arcs.push([x, y]);
+      return () => {};
+    },
+    set(t, key, value) {
+      t[key] = value;
+      return true;
+    },
+  });
+  return { ctx, arcs };
+}
+
+test('collapse: particles start on a ring and move in to the centre, slowly at the rim and fast at the end (#56)', () => {
+  const fx = createFx({ random: seeded(23) });
+  fx.collapse(400, 300, { count: 30, collapse: 200, life: 1, shape: 'dot', size: 3 });
+  const distances = () => {
+    const { ctx, arcs } = arcRecorder();
+    fx.drawWorld(ctx);
+    return arcs.map(([x, y]) => Math.hypot(x - 400, y - 300));
+  };
+  const d0 = distances();
+  assert.equal(d0.length, 30);
+  for (const d of d0) assert.ok(d >= 170 - 1e-9 && d <= 230 + 1e-9, `starts on the ring, at ${d}`);
+
+  fx.update(0.1);
+  fx.update(0.1);
+  fx.update(0.1);
+  fx.update(0.1); // 0.4 s: every particle is still live (its life is at least 0.8 s)
+  const d1 = distances();
+  assert.equal(d1.length, 30, 'none expired early');
+  for (let i = 0; i < d0.length; i++) {
+    assert.ok(d1[i] < d0[i], `particle ${i} moved in, ${d0[i]} -> ${d1[i]}`);
+    assert.ok(d1[i] < 115, `particle ${i} is well inside the ring after 0.4 s, at ${d1[i]}`);
+  }
+  for (let i = 0; i < 30 && fx.count() > 0; i++) fx.update(0.1);
+  assert.equal(fx.count(), 0, 'every collapse particle ends at the centre and is recycled');
+});
+
+test('a recycled pool slot reverts to an outward burst after a collapse (no stale inward motion)', () => {
+  const fx = createFx({ random: seeded(29) });
+  fx.collapse(100, 100, { count: 20, collapse: 80, life: 0.3, shape: 'dot' });
+  for (let i = 0; i < 10; i++) fx.update(0.1);
+  assert.equal(fx.count(), 0, 'the collapse has finished');
+  fx.burst(100, 100, { count: 6, speed: 300, life: 1, shape: 'dot' });
+  const first = () => {
+    const { ctx, arcs } = arcRecorder();
+    fx.drawWorld(ctx);
+    return arcs;
+  };
+  const a = first();
+  fx.update(0.05);
+  const b = first();
+  assert.equal(a.length, 6);
+  assert.equal(b.length, 6);
+  for (let i = 0; i < a.length; i++) {
+    const before = Math.hypot(a[i][0] - 100, a[i][1] - 100);
+    const after = Math.hypot(b[i][0] - 100, b[i][1] - 100);
+    assert.ok(after > before, `burst particle ${i} moves outward, ${before} -> ${after}`);
+  }
+});
+
+test('the perfect-pulse preset adds no slow-motion, so the sim is the only time scale (#104)', () => {
+  assert.equal(FX_PRESETS.perfectPulse.slowmo, undefined);
+  const fx = createFx({ random: seeded(21) });
+  fx.preset('perfectPulse', 100, 100);
+  assert.equal(fx.update(1 / 60), 1, 'no time scale from the preset');
+});
