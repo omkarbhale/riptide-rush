@@ -21,10 +21,11 @@
   button:active { transform: translateY(1px); }
   button:disabled { opacity: 0.5; cursor: default; }
   button.primary { background: #0f3a4a; border-color: #3cf2ff; }
+  button[aria-pressed=true] { background: #3a1430; border-color: #ff3d81; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
   .grid button { text-align: left; font-variant-numeric: tabular-nums; }
   canvas { width: 100%; height: auto; display: block; border-radius: 8px; background: #050a18; border: 1px solid #17305a; }
-  #status, #analyseStatus { color: #8fa6cf; }
+  #status, #analyseStatus, #mixStatus { color: #8fa6cf; }
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
   th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #17305a; vertical-align: top; }
   th { color: #8fa6cf; font-weight: 600; }
@@ -33,6 +34,7 @@
   .bad { color: #ff3d81; }
   .scroll { overflow-x: auto; }
   pre { white-space: pre-wrap; background: #050a18; padding: 10px; border-radius: 8px; border: 1px solid #17305a; font-size: 12px; }
+  @media (max-width: 600px) { main { padding: 12px; } input[type=range] { width: 130px; } }
 </style>
 </head>
 <body>
@@ -53,6 +55,7 @@
     <div class="row" style="margin-bottom: 10px;">
       <button id="combo" class="primary">Play 20 kills as a rising combo</button>
       <button id="burst">30 kills in one second</button>
+      <button id="burstMusic">30 kills in one second over full music</button>
     </div>
     <div id="grid" class="grid"></div>
   </section>
@@ -60,9 +63,12 @@
   <h2>Adaptive music</h2>
   <section class="panel row">
     <button id="musicStart" class="primary">Start music</button>
-    <button id="musicStop">Stop music</button>
+    <button id="musicStop">Stop music (game over)</button>
+    <button id="musicPause" aria-pressed="false">Pause</button>
+    <button id="musicDanger" aria-pressed="false">Low health (danger)</button>
     <label>Intensity <input id="intensity" type="range" min="0" max="1" step="0.01" value="0"><output id="intensityOut"></output></label>
   </section>
+  <p class="lede">Layer and danger changes land on the next bar line (about 1.9 s at 128 BPM), so a change can take up to one bar to be heard.</p>
 
   <h2>Live output (AnalyserNode on the master bus)</h2>
   <section class="panel">
@@ -71,19 +77,30 @@
     <canvas id="spec" width="1000" height="220" aria-label="Spectrum, 0 to 8 kHz"></canvas>
   </section>
 
-  <h2>Offline analysis</h2>
+  <h2>Offline analysis: every sound</h2>
   <section class="panel">
     <div class="row">
       <button id="analyse" class="primary">Analyse every sound offline</button>
       <span id="analyseStatus">Renders each sound at pitch 1, volume 1 through OfflineAudioContext.</span>
     </div>
+    <p class="lede" style="margin-top: 10px;">Nearest sibling is the most similar other sound by log-spectrum cosine similarity (1.000 = identical spectrum). Anything at 0.950 or above is flagged: it is likely to be heard as the same sound.</p>
     <div id="report" class="scroll" style="margin-top: 12px;"></div>
     <pre id="reportText" hidden></pre>
+  </section>
+
+  <h2>Offline analysis: mix and levels</h2>
+  <section class="panel">
+    <div class="row">
+      <button id="mix" class="primary">Measure the mix</button>
+      <span id="mixStatus">Stacking, limiter and threat-level checks, rendered offline through the same chain.</span>
+    </div>
+    <div id="mixReport" class="scroll" style="margin-top: 12px;"></div>
+    <pre id="mixText" hidden></pre>
   </section>
 </main>
 
 <script type="module">
-import { audio, SOUND_NAMES, getOutputNode, renderSound } from '../src/audio.js';
+import { audio, SOUND_NAMES, getOutputNode, renderSound, renderMix } from '../src/audio.js';
 
 // Intended character per sound, checked by eye against the measured numbers.
 const PURPOSE = {
@@ -107,6 +124,21 @@ const PURPOSE = {
   uiClick: 'tiny tick',
   uiStart: 'two-note upbeat',
   spawnWarn: 'two alarm beeps',
+  deflect: 'inharmonic metal clang (Shellback armour)',
+  stagger: 'short wooden knock, falling',
+  waveClear: 'bright A minor arpeggio stinger',
+  pickup: 'quick upward bloop',
+  heal: 'warm major triad, slow swell',
+  shieldBreak: 'glass shatter',
+  modifierEnd: 'power-down tick, two falling notes',
+  bulletCut: 'quick downward air slice',
+  dashWhiff: 'faint air puff, no tone',
+  spitterWindup: 'wet gurgle, beating pair rising',
+  hint: 'two soft bells a fifth apart',
+  bossRoar: 'low detuned growl, 1.1 s',
+  bossHit: 'heavy thump with a hard click',
+  pufferPop: 'quick upward bubble pop',
+  inkSplat: 'wet smear, falling, with droplets',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -173,13 +205,21 @@ $('combo').addEventListener('click', () => {
   }
 });
 
-// Stress test: 30 kills in one second must stay clean (voice stealing).
-$('burst').addEventListener('click', () => {
-  ensureAudio();
+// Stress test: 30 kills in one second must stay clean (voice stealing). The music variant runs
+// the same burst over the full-intensity bed, as the mix check does offline.
+function burst() {
   const base = +pitch.value;
   for (let i = 0; i < 30; i++) {
     setTimeout(() => audio.play('kill', { ...opts(), pitch: base * 2 ** (i / 24) }), i * 33);
   }
+}
+$('burst').addEventListener('click', () => { ensureAudio(); burst(); });
+$('burstMusic').addEventListener('click', () => {
+  ensureAudio();
+  intensity.value = 1;
+  intensity.dispatchEvent(new Event('input'));
+  audio.startMusic();
+  burst();
 });
 
 $('musicStart').addEventListener('click', () => {
@@ -188,6 +228,21 @@ $('musicStart').addEventListener('click', () => {
   audio.startMusic();
 });
 $('musicStop').addEventListener('click', () => audio.stopMusic());
+const pauseBtn = $('musicPause');
+pauseBtn.addEventListener('click', () => {
+  ensureAudio();
+  const on = pauseBtn.getAttribute('aria-pressed') !== 'true';
+  pauseBtn.setAttribute('aria-pressed', String(on));
+  pauseBtn.textContent = on ? 'Resume' : 'Pause';
+  audio.setMusicPaused(on);
+});
+const dangerBtn = $('musicDanger');
+dangerBtn.addEventListener('click', () => {
+  ensureAudio();
+  const on = dangerBtn.getAttribute('aria-pressed') !== 'true';
+  dangerBtn.setAttribute('aria-pressed', String(on));
+  audio.setMusicDanger(on);
+});
 intensity.addEventListener('input', () => {
   ensureAudio();
   audio.setMusicIntensity(+intensity.value);
@@ -292,6 +347,10 @@ function fft(re, im) {
   }
 }
 
+// Log-spaced band edges for the spectral fingerprint: 40 Hz to 16 kHz, 48 bands.
+const BANDS = 48;
+const BAND_EDGES = Array.from({ length: BANDS + 1 }, (_, i) => 40 * (16000 / 40) ** (i / BANDS));
+
 function analyse(buf) {
   const x = buf.getChannelData(0);
   const sr = buf.sampleRate;
@@ -321,13 +380,33 @@ function analyse(buf) {
   fft(re, im);
   let best = 0;
   let bestHz = 0;
+  const bands = new Float64Array(BANDS);
   for (let k = 1; k < n / 2; k++) {
     const hz = (k * sr) / n;
     if (hz < 20) continue;
     const m = re[k] * re[k] + im[k] * im[k];
     if (m > best) { best = m; bestHz = hz; }
+    if (hz >= BAND_EDGES[0] && hz < BAND_EDGES[BANDS]) {
+      let b = 0;
+      while (hz >= BAND_EDGES[b + 1]) b++;
+      bands[b] += m;
+    }
   }
-  return { duration: active / sr, peak, rms, dominant: bestHz };
+  // Square root of band energy: cosine on this is a spectral-shape similarity, independent of loudness.
+  for (let b = 0; b < BANDS; b++) bands[b] = Math.sqrt(bands[b]);
+  return { duration: active / sr, peak, rms, dominant: bestHz, bands };
+}
+
+function cosine(a, b) {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na * nb) || 1);
 }
 
 function check(name, r) {
@@ -339,6 +418,7 @@ function check(name, r) {
 }
 
 const dB = (v) => (v > 0 ? 20 * Math.log10(v) : -Infinity).toFixed(1);
+const SIBLING_FLAG = 0.95;
 
 $('analyse').addEventListener('click', async () => {
   const btn = $('analyse');
@@ -358,19 +438,31 @@ $('analyse').addEventListener('click', async () => {
   }
   btn.disabled = false;
   if (rows.length === 0) return;
-  label.textContent = 'done: ' + rows.length + ' sounds analysed';
+
+  // Nearest sibling for each sound: the most similar other sound.
+  for (const r of rows) {
+    let best = { name: '-', sim: -1 };
+    for (const o of rows) {
+      if (o === r) continue;
+      const sim = cosine(r.bands, o.bands);
+      if (sim > best.sim) best = { name: o.name, sim };
+    }
+    r.sibling = best;
+  }
+  const flagged = rows.filter((r) => r.sibling.sim >= SIBLING_FLAG);
+  label.textContent = 'done: ' + rows.length + ' sounds analysed; ' + flagged.length + ' flagged for a close sibling';
   window.soundReport = rows;
 
-  const head = '| Sound | Intended character | Duration (ms) | Peak | RMS (dBFS) | Dominant (Hz) | Check |';
-  const sep = '|---|---|---:|---:|---:|---:|---|';
+  const head = '| Sound | Intended character | Duration (ms) | Peak | RMS (dBFS) | Dominant (Hz) | Nearest sibling | Check |';
+  const sep = '|---|---|---:|---:|---:|---:|---|---|';
   const md = rows.map((r) =>
-    `| ${r.name} | ${PURPOSE[r.name]} | ${(r.duration * 1000).toFixed(1)} | ${r.peak.toFixed(3)} | ${dB(r.rms)} | ${r.dominant.toFixed(0)} | ${r.verdict} |`);
+    `| ${r.name} | ${PURPOSE[r.name]} | ${(r.duration * 1000).toFixed(1)} | ${r.peak.toFixed(3)} | ${dB(r.rms)} | ${r.dominant.toFixed(0)} | ${r.sibling.name} ${r.sibling.sim.toFixed(3)} | ${r.verdict} |`);
   $('reportText').hidden = false;
   $('reportText').textContent = [head, sep, ...md].join('\n');
 
   const table = document.createElement('table');
   table.innerHTML = '<thead><tr><th>Sound</th><th>Intended character</th><th class="num">Duration (ms)</th>'
-    + '<th class="num">Peak</th><th class="num">RMS (dBFS)</th><th class="num">Dominant (Hz)</th><th>Check</th></tr></thead>';
+    + '<th class="num">Peak</th><th class="num">RMS (dBFS)</th><th class="num">Dominant (Hz)</th><th>Nearest sibling</th><th>Check</th></tr></thead>';
   const tbody = document.createElement('tbody');
   for (const r of rows) {
     const tr = document.createElement('tr');
@@ -388,6 +480,11 @@ $('analyse').addEventListener('click', async () => {
       if (i >= 2 && i <= 5) td.className = 'num';
       tr.append(td);
     }
+    const sib = document.createElement('td');
+    sib.className = 'num';
+    sib.textContent = r.sibling.name + ' ' + r.sibling.sim.toFixed(3);
+    if (r.sibling.sim >= SIBLING_FLAG) sib.classList.add('bad');
+    tr.append(sib);
     const vt = document.createElement('td');
     vt.textContent = r.verdict;
     vt.className = r.verdict === 'OK' ? 'ok' : 'bad';
@@ -396,6 +493,153 @@ $('analyse').addEventListener('click', async () => {
   }
   table.append(tbody);
   $('report').replaceChildren(table);
+});
+
+// ---- mix analysis: the same chain, rendered offline with the music running
+const SR = 48000;
+function peakOf(buf) {
+  const x = buf.getChannelData(0);
+  let p = 0;
+  for (let i = 0; i < x.length; i++) p = Math.max(p, Math.abs(x[i]));
+  return p;
+}
+function rmsOf(buf, from = 0, to = buf.length) {
+  const x = buf.getChannelData(0);
+  let s = 0;
+  for (let i = from; i < to; i++) s += x[i] * x[i];
+  return Math.sqrt(s / Math.max(1, to - from));
+}
+// Windowed RMS of a buffer, in dB, one value per window of `ms` milliseconds, starting at `offset` samples.
+function windowsDb(buf, ms, offset) {
+  const x = buf.getChannelData(0);
+  const w = Math.round((SR * ms) / 1000);
+  const out = [];
+  for (let i = 0; i + w + offset <= x.length; i += w) {
+    let s = 0;
+    for (let j = i + offset; j < i + offset + w; j++) s += x[j] * x[j];
+    out.push(10 * Math.log10(s / w + 1e-18));
+  }
+  return out;
+}
+
+// Samples by which `delayed` lags `ref`, found by cross-correlation over the first 0.6 s.
+function lagBetween(delayed, ref) {
+  const d = delayed.getChannelData(0);
+  const r = ref.getChannelData(0);
+  const N = Math.round(0.6 * SR);
+  let best = -Infinity;
+  let bestLag = 0;
+  for (let lag = 0; lag < 512; lag++) {
+    let s = 0;
+    for (let i = 0; i < N; i++) s += d[i + lag] * r[i];
+    if (s > best) { best = s; bestLag = lag; }
+  }
+  return bestLag;
+}
+
+// Worst-case stacking: 30 kills in one second (same pitch ladder as the live burst), full-intensity music.
+async function stackingCase(volume) {
+  const events = [];
+  for (let i = 0; i < 30; i++) events.push({ name: 'kill', t: 0.2 + i / 30, pitch: 2 ** (i / 24), volume });
+  const seconds = 2.6;
+  const limited = await renderMix({ seconds, music: true, intensity: 1, events });
+  const linear = await renderMix({ seconds, music: true, intensity: 1, events, bypassLimiter: true });
+    // The limiter's output is a few samples late (4x oversampling), so align the two renders before comparing.
+  const lag = lagBetween(limited, linear);
+  // Gain reduction per 50 ms window: limited RMS over linear RMS, where the linear mix is audible.
+  const gl = windowsDb(limited, 50, lag);
+  const gn = windowsDb(linear, 50, 0);
+  let worstGr = 0;
+  let worstStep = 0;
+  for (let i = 0; i < gn.length; i++) {
+    if (gn[i] < -40) continue;
+    const gr = gl[i] - gn[i];
+    worstGr = Math.min(worstGr, gr);
+    if (i > 0 && gn[i - 1] >= -40) worstStep = Math.max(worstStep, Math.abs(gr - (gl[i - 1] - gn[i - 1])));
+  }
+  return {
+    limitedPeak: peakOf(limited),
+    linearPeak: peakOf(linear),
+    worstGrDb: worstGr,
+    worstStepDbPer50ms: worstStep,
+    latencyMs: (lag / SR) * 1000,
+    musicRmsDb: 10 * Math.log10(rmsOf(limited, 0.6 * SR, 2.4 * SR) ** 2),
+  };
+}
+
+// Threat levels: each threat alone against the full-intensity bed. Peak of the threat over RMS of the bed.
+async function threatCase(name) {
+  const seconds = 2.6;
+  const bed = await renderMix({ seconds, music: true, intensity: 1 });
+  const threat = await renderSound(name, { seconds: 1 });
+  const bedRms = rmsOf(bed, 0.6 * SR, 2.4 * SR);
+  const threatPeak = peakOf(threat);
+  return { name, threatPeakDb: 20 * Math.log10(threatPeak), bedRmsDb: 20 * Math.log10(bedRms), marginDb: 20 * Math.log10(threatPeak / bedRms) };
+}
+
+$('mix').addEventListener('click', async () => {
+  const btn = $('mix');
+  const label = $('mixStatus');
+  btn.disabled = true;
+  try {
+    label.textContent = 'rendering the stacking case';
+    const stack = await stackingCase(1);
+    label.textContent = 'rendering the stacking case at +6 dB';
+    const hot = await stackingCase(2);
+    label.textContent = 'rendering the threat levels';
+    const threats = [];
+    for (const name of ['spitterWindup', 'mineArm', 'chargerTelegraph']) threats.push(await threatCase(name));
+    window.mixReport = { stack, hot, threats };
+
+    const f = (v) => (Number.isFinite(v) ? v.toFixed(1) : '-');
+    const stackRows = [];
+    for (const [tag, st] of [['30 kills, volume 1', stack], ['30 kills, volume 2 (+6 dB)', hot]]) {
+      stackRows.push(
+        [tag + ': master peak, limited (must be under 1.0)', st.limitedPeak.toFixed(3), st.limitedPeak < 1 ? 'OK' : 'FAIL'],
+        [tag + ': master peak, linear (no limiter)', st.linearPeak.toFixed(3), st.linearPeak >= 1 ? 'over 1.0 without the limiter' : 'under 1.0 even without the limiter'],
+        [tag + ': worst gain reduction, 50 ms windows (dB)', f(st.worstGrDb), ''],
+        [tag + ': largest gain-reduction change, 50 ms windows (dB)', f(st.worstStepDbPer50ms), st.worstStepDbPer50ms <= 1 ? 'OK' : 'check for pumping'],
+      );
+    }
+    stackRows.push(
+      ['Limiter latency (ms, aligned out before comparing)', stack.latencyMs.toFixed(2), ''],
+      ['Music bed RMS during the stack, limited (dBFS)', f(stack.musicRmsDb), ''],
+    );
+    const threatRows = threats.map((t) => [
+      t.name + ' peak over full-intensity bed RMS (dB)',
+      f(t.marginDb),
+      t.marginDb >= 6 ? 'OK' : 'too quiet against the bed',
+    ]);
+
+    const head = '| Measure | Value | Check |';
+    const sep = '|---|---:|---|';
+    const md = [...stackRows, ...threatRows].map((r) => `| ${r[0]} | ${r[1]} | ${r[2]} |`);
+    $('mixText').hidden = false;
+    $('mixText').textContent = [head, sep, ...md].join('\n');
+
+    const table = document.createElement('table');
+    table.innerHTML = '<thead><tr><th>Measure</th><th class="num">Value</th><th>Check</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    for (const r of [...stackRows, ...threatRows]) {
+      const tr = document.createElement('tr');
+      const a = document.createElement('td');
+      a.textContent = r[0];
+      const b = document.createElement('td');
+      b.textContent = r[1];
+      b.className = 'num';
+      const c = document.createElement('td');
+      c.textContent = r[2];
+      c.className = r[2] === 'OK' || r[2] === '' || r[2].startsWith('under') ? 'ok' : 'bad';
+      tr.append(a, b, c);
+      tbody.append(tr);
+    }
+    table.append(tbody);
+    $('mixReport').replaceChildren(table);
+    label.textContent = 'done';
+  } catch (err) {
+    label.textContent = 'mix analysis failed: ' + err;
+  }
+  btn.disabled = false;
 });
 </script>
 </body>
