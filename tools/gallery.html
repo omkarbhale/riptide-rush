@@ -31,7 +31,7 @@
   <p>Every sprite is procedural Canvas 2D (<code>src/art.js</code>). Rows are the three states each enemy must read in:
      normal, hit flash, and telegraph. The 1x row is gameplay scale; the 3x row is for silhouette checks.</p>
 
-  <canvas id="gallery" width="1280" height="1400" aria-label="Art gallery: background, player, enemies, bullets and pulse"></canvas>
+  <canvas id="gallery" width="1280" height="1520" aria-label="Art gallery: background, player, enemies, bullets and pulse"></canvas>
 
   <h2>Stress: 200 mixed enemies</h2>
   <div id="readout">FPS --</div>
@@ -45,7 +45,7 @@
 
   // ---- gallery canvas -------------------------------------------------------
   const GW = 1280;
-  const GH = 1400;
+  const GH = 1520;
   const gal = document.getElementById('gallery');
   const g = gal.getContext('2d');
 
@@ -162,6 +162,21 @@
       draw.pulse(c, w / 2, h / 2, r, 1 - r / 130);
       draw.bullet(c, w / 2, h / 2, t, { reflected: true });
       label(c, 'pulse ring (looping)', 6, h - 8, '#8fb4d9', 11);
+    });
+
+    // 5. Bullets in flight: the trail is drawn when the velocity is passed (vx, vy).
+    label(g, 'BULLETS in flight (trail from vx, vy)', 4, 1412, '#ffb347');
+    const flight = [
+      ['enemy bullet, moving right', { vx: 200, vy: 0 }, false],
+      ['enemy bullet, moving up-left', { vx: -140, vy: -140 }, false],
+      ['reflected, moving left', { vx: -200, vy: 0 }, true],
+      ['reflected, moving down', { vx: 0, vy: 200 }, true],
+    ];
+    flight.forEach(([name, v, reflected], i) => {
+      cell(4 + i * 256, 1422, 248, 90, t, (c, w, h) => {
+        draw.bullet(c, w / 2, h / 2, t, { ...v, reflected });
+        label(c, name, 6, h - 8, '#8fb4d9', 11);
+      });
     });
     g.restore();
   }
