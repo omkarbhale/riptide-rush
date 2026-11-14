@@ -6,8 +6,12 @@
 //
 // Entities are drawn in local space with the nose toward +x, then rotated by `angle`.
 // Glow is layered strokes and sprites composited with 'lighter', never shadowBlur.
-// Enemy bodies are cached as sprites (one per type, plus flash and telegraph overlays);
-// animated details such as tendrils, spikes, cores and aim lines are drawn live.
+//
+// Performance (#74): every enemy body is one cached sprite per type and state (normal,
+// flash, telegraph), with its static detail baked in. Drifter tendrils are baked for 16
+// animation phases. Per frame an enemy costs one or two drawImage calls plus a few
+// small fills. The background is cached at device resolution, so it blits 1:1, and the
+// plankton is batched into a few paths. No shadowBlur and no per-frame gradients in hot paths.
 
 const TAU = Math.PI * 2;
 
@@ -115,13 +119,13 @@ function mixHex(a, b, k) {
 // document.createElement are both unavailable (Node, very old browsers).
 const layerCache = new Map();
 function makeCanvas(w, h) {
-  if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(w, h);
   if (typeof document !== 'undefined' && document && typeof document.createElement === 'function') {
     const c = document.createElement('canvas');
     c.width = w;
     c.height = h;
     return c;
   }
+  if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(w, h);
   return null;
 }
 
@@ -136,7 +140,7 @@ function cachedLayer(key, w, h, paint) {
 }
 
 // Tint an enemy colour toward danger (telegraph) and toward white (hit flash).
-// Used by the live fallback path and by dynamic details.
+// Used by the live fallback path.
 function tint(base, o) {
   let c = base;
   if (o.telegraph > 0) c = mixHex(c, PALETTE.danger, o.telegraph * 0.5);
@@ -145,7 +149,7 @@ function tint(base, o) {
 }
 
 // Neon body: additive halo strokes, a dark tinted fill, and a bright edge.
-// `build` must add subpaths only; it is called three times for one shape.
+// `build` must add subpaths only; it is called twice for one shape.
 function neonBody(ctx, build, color, glow) {
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
@@ -170,24 +174,87 @@ function neonBody(ctx, build, color, glow) {
 }
 
 // Wind-up ring for any enemy. It contracts toward the body as the telegraph completes.
+// Dashed strokes are costly on the canvas, so the ring is a cached sprite per telegraph level
+// (8 levels), rotated to animate the dashes and faded by alpha for the strobe.
+const WARN_LEVELS = 8;
+const WARN_HALF = 30; // sprite covers [-30, 30] local units
+const WARN_RES = 3;
+function warnRingSprite(level) {
+  return cachedLayer('warn:' + level, WARN_HALF * 2 * WARN_RES, WARN_HALF * 2 * WARN_RES, (g) => {
+    const tg = level / WARN_LEVELS;
+    const r = R * (2.0 - 0.7 * tg);
+    g.setTransform(WARN_RES, 0, 0, WARN_RES, WARN_HALF * WARN_RES, WARN_HALF * WARN_RES);
+    g.setLineDash([3, 4]);
+    g.beginPath();
+    g.arc(0, 0, r, 0, TAU);
+    g.strokeStyle = PALETTE.danger;
+    g.lineWidth = 1.5 + 1.5 * tg;
+    g.stroke();
+  });
+}
+
 function warnRing(ctx, t, tg) {
+  const level = Math.max(1, Math.min(WARN_LEVELS, Math.round(tg * WARN_LEVELS)));
   const strobe = 0.5 + 0.5 * Math.sin(t * (14 + 24 * tg));
-  const r = R * (2.0 - 0.7 * tg);
+  const r = R * (2.0 - 0.7 * (level / WARN_LEVELS));
+  const sprite = warnRingSprite(level);
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.setLineDash([3, 4]);
-  ctx.lineDashOffset = -t * 40;
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, TAU);
-  ctx.strokeStyle = rgba(PALETTE.danger, tg * (0.25 + 0.6 * strobe));
-  ctx.lineWidth = 1.5 + 1.5 * tg;
-  ctx.stroke();
+  if (sprite) {
+    // Rotating the ring by offset / radius moves its dashes the same way as a dash offset would.
+    ctx.rotate((-t * 40) / r);
+    ctx.globalAlpha = Math.min(1, tg * (0.25 + 0.6 * strobe));
+    ctx.drawImage(sprite, -WARN_HALF, -WARN_HALF, WARN_HALF * 2, WARN_HALF * 2);
+  } else {
+    ctx.setLineDash([3, 4]);
+    ctx.lineDashOffset = -t * 40;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, TAU);
+    ctx.strokeStyle = rgba(PALETTE.danger, tg * (0.25 + 0.6 * strobe));
+    ctx.lineWidth = 1.5 + 1.5 * tg;
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
 // ---------------------------------------------------------------------------
-// background: static layers are cached, motes and caustics animate on top
+// background: device-resolution layers, plus batched plankton
 // ---------------------------------------------------------------------------
+
+// Scale of the current transform, so cached layers match device pixels and blit 1:1.
+// Falls back to 1 when the context cannot report its transform (Node mock contexts).
+function scaleOf(ctx) {
+  if (typeof ctx.getTransform === 'function') {
+    const m = ctx.getTransform();
+    if (m && m.b === 0 && m.c === 0 && m.a > 0 && m.d > 0 && Number.isFinite(m.a) && Number.isFinite(m.d)) {
+      return { sx: Math.min(4, Math.max(0.25, m.a)), sy: Math.min(4, Math.max(0.25, m.d)) };
+    }
+  }
+  return { sx: 1, sy: 1 };
+}
+
+// Background layers are few (one per arena size and scale), so the cache stays small.
+const bgCache = new Map();
+const BG_LAYER_LIMIT = 6;
+function bgLayer(name, w, h, sx, sy, logicalW, logicalH, ox, oy, paint) {
+  const key = name + ':' + w + 'x' + h + '@' + sx.toFixed(2) + ',' + sy.toFixed(2);
+  let c = bgCache.get(key);
+  if (c === undefined) {
+    if (bgCache.size >= BG_LAYER_LIMIT) bgCache.delete(bgCache.keys().next().value);
+    const cw = Math.max(1, Math.round(logicalW * sx));
+    const ch = Math.max(1, Math.round(logicalH * sy));
+    c = makeCanvas(cw, ch);
+    if (c) {
+      const g = c.getContext('2d');
+      const kx = cw / logicalW;
+      const ky = ch / logicalH;
+      g.setTransform(kx, 0, 0, ky, ox * kx, oy * ky);
+      paint(g);
+    }
+    bgCache.set(key, c);
+  }
+  return c;
+}
 
 function paintStaticBackground(g, w, h) {
   const grad = g.createLinearGradient(0, 0, 0, h);
@@ -269,25 +336,42 @@ const MOTES = (function () {
   return list;
 })();
 
+// Motes are grouped by brightness (1/32 steps), so each frame is one fill per group, not one per mote.
+const MOTE_STEPS = 32;
+const MOTE_FILL = Array.from({ length: MOTE_STEPS + 1 }, (_, i) => rgba('#bff6ff', i / MOTE_STEPS));
+const moteGroups = Array.from({ length: MOTE_STEPS + 1 }, () => []);
+
 // Plankton drifts left. Nearer motes (larger d) move faster and look brighter.
 function drawMotes(ctx, w, h, t) {
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
+  for (let q = 0; q <= MOTE_STEPS; q++) moteGroups[q].length = 0;
   for (let i = 0; i < MOTES.length; i++) {
     const m = MOTES[i];
-    const sx = m.x * w - t * (5 + 24 * m.d);
-    const x = ((sx % w) + w) % w;
-    const y = m.y * h + Math.sin(t * 0.5 + m.p) * 5 * m.d;
-    ctx.fillStyle = rgba('#bff6ff', 0.12 + 0.35 * m.d * (0.75 + 0.25 * Math.sin(t * 1.7 + m.p * 3)));
+    const a = 0.12 + 0.35 * m.d * (0.75 + 0.25 * Math.sin(t * 1.7 + m.p * 3));
+    moteGroups[Math.round(clamp01(a) * MOTE_STEPS)].push(i);
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let q = 0; q <= MOTE_STEPS; q++) {
+    const group = moteGroups[q];
+    if (group.length === 0) continue;
+    ctx.fillStyle = MOTE_FILL[q];
     ctx.beginPath();
-    ctx.arc(x, y, 0.6 + 1.5 * m.d, 0, TAU);
+    for (let j = 0; j < group.length; j++) {
+      const m = MOTES[group[j]];
+      const sx = m.x * w - t * (5 + 24 * m.d);
+      const x = ((sx % w) + w) % w;
+      const y = m.y * h + Math.sin(t * 0.5 + m.p) * 5 * m.d;
+      const r = 0.6 + 1.5 * m.d;
+      ctx.moveTo(x + r, y);
+      ctx.arc(x, y, r, 0, TAU);
+    }
     ctx.fill();
   }
   ctx.restore();
 }
 
 // ---------------------------------------------------------------------------
-// sprites
+// glow sprites
 // ---------------------------------------------------------------------------
 
 function glowSprite(key, color) {
@@ -299,6 +383,17 @@ function glowSprite(key, color) {
     grad.addColorStop(1, rgba(color, 0));
     g.fillStyle = grad;
     g.fillRect(0, 0, 64, 64);
+  });
+}
+
+// Thin ring used as the bullet's pulsing outline.
+function ringSprite(key, color) {
+  return cachedLayer('ring:' + key, 64, 64, (g) => {
+    g.strokeStyle = color;
+    g.lineWidth = 4;
+    g.beginPath();
+    g.arc(32, 32, 26, 0, TAU);
+    g.stroke();
   });
 }
 
@@ -419,9 +514,26 @@ function drawPlayer(ctx, x, y, angle, t, opts) {
 // enemies: each type has its own silhouette and colour, drawn in local space
 // ---------------------------------------------------------------------------
 
-// Static bodies, drawn in colour `c`. These are the parts that get cached as sprites.
+// Sprites cover [-SPRITE_HX, SPRITE_HX] x [-SPRITE_HY, SPRITE_HY] in local units. The box is tight
+// around every silhouette (widest: drifter tendrils and the spitter snout). Each sprite is rendered at
+// the resolution it will be drawn at (`res` pixels per local unit, from the on-screen scale), so it
+// is never downsampled per draw. Flash and telegraph states are baked in at quantised levels.
+const SPRITE_HX = 1.7 * R;
+const SPRITE_HY = 1.2 * R;
+const SPRITE_MAX_RES = 4;
+const FLASH_LEVELS = 2; // flash 0, 0.5, 1
+const TELE_LEVELS = 4; // telegraph 0, 0.25, ... 1
+
+function spriteRes(v) {
+  return Math.min(SPRITE_MAX_RES, Math.max(1, Math.ceil(v - 1e-6)));
+}
+
+// Drifter tendrils are baked for this many phases of their sin(4t) wobble.
+const TENDRIL_PHASES = 16;
+
+// Static bodies, drawn in colour `c`. Every static detail is baked into the body sprite.
 const BODY = {
-  // Jellyfish bell. Its tendrils are live.
+  // Jellyfish bell with its eye.
   drifter(g, c) {
     neonBody(
       g,
@@ -440,7 +552,7 @@ const BODY = {
     g.fill();
   },
 
-  // Diamond with a snout. The muzzle glow is live.
+  // Diamond with a snout and a pale muzzle spot.
   spitter(g, c) {
     neonBody(
       g,
@@ -485,12 +597,49 @@ const BODY = {
     g.stroke();
   },
 
-  // Full disc. The armour and the teal weak spot are live.
-  shellback(g, c) {
+  // Full disc, then the armoured front half, its ribs, and any cracks (`cracks` 0..2).
+  shellback(g, c, cracks) {
     neonBody(g, (p) => p.arc(0, 0, R, 0, TAU), c, 1);
+
+    // Armoured front: a half-disc closed across its diameter.
+    g.beginPath();
+    g.arc(0, 0, R * 1.02, -Math.PI / 2, Math.PI / 2);
+    g.closePath();
+    g.fillStyle = '#c4d8ff';
+    g.fill();
+    g.strokeStyle = rgba('#ffffff', 0.9);
+    g.lineWidth = 1.4;
+    g.stroke();
+
+    // Armour plate ribs.
+    g.strokeStyle = rgba(c, 0.6);
+    g.lineWidth = 1;
+    g.beginPath();
+    for (let i = -2; i <= 2; i++) {
+      const a = i * 0.45;
+      g.moveTo(R * 0.15 * Math.cos(a), R * 0.15 * Math.sin(a));
+      g.lineTo(R * 0.98 * Math.cos(a), R * 0.98 * Math.sin(a));
+    }
+    g.stroke();
+
+    if (cracks > 0) {
+      g.strokeStyle = rgba(PALETTE.deepTop, 0.85);
+      g.lineWidth = 1.2;
+      g.beginPath();
+      g.moveTo(R * 0.3, -R * 0.8);
+      g.lineTo(R * 0.55, -R * 0.35);
+      g.lineTo(R * 0.4, -R * 0.05);
+      if (cracks > 1) {
+        g.moveTo(R * 0.55, -R * 0.35);
+        g.lineTo(R * 0.8, -R * 0.2);
+        g.moveTo(R * 0.4, R * 0.05);
+        g.lineTo(R * 0.7, R * 0.5);
+      }
+      g.stroke();
+    }
   },
 
-  // Hexagonal cell. The caller rotates it. The division lines are live.
+  // Hexagonal cell. Its division lines and centre are drawn live, so they can pull apart.
   splitter(g, c) {
     neonBody(
       g,
@@ -525,80 +674,127 @@ const BODY = {
     );
   },
 
-  // Core disc. The spikes and the strobing core are live.
+  // Spikes (drawn first, behind the core), then the core disc. The whole sprite spins.
   mine(g, c) {
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    g.lineCap = 'round';
+    g.strokeStyle = rgba(c, 0.9);
+    g.lineWidth = 1.8;
+    g.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i * TAU) / 8;
+      g.moveTo(Math.cos(a) * R * 0.62, Math.sin(a) * R * 0.62);
+      g.lineTo(Math.cos(a) * R * 1.15, Math.sin(a) * R * 1.15);
+    }
+    g.stroke();
+    g.restore();
     neonBody(g, (p) => p.arc(0, 0, R * 0.66, 0, TAU), c, 1);
   },
 };
 
-// Sprites cover [-SPRITE_HALF, SPRITE_HALF] in local units, at SPRITE_RES px per unit.
-const SPRITE_RES = 3;
-const SPRITE_HALF = 2 * R;
-const SPRITE_PX = Math.ceil(SPRITE_HALF * 2 * SPRITE_RES);
+// Drifter tendrils for one phase of their wobble. `a` is the phase angle (sin(4t) in radians).
+function tendrilsPaint(a) {
+  return (g, c) => {
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    g.lineCap = 'round';
+    for (let i = 0; i < 3; i++) {
+      const oy = (i - 1) * R * 0.5;
+      g.beginPath();
+      g.moveTo(-R * 0.2, oy);
+      g.quadraticCurveTo(-R * 0.9, oy + Math.sin(a + i * 2 + 1) * R * 0.25, -R * 1.6, oy + Math.sin(a + i * 2) * R * 0.35);
+      g.strokeStyle = rgba(c, 0.85);
+      g.lineWidth = 1.6;
+      g.stroke();
+    }
+    g.restore();
+  };
+}
 
-// Base sprite for a type, or an overlay: 'flash' is white, 'tele' is danger magenta.
-// Overlays are the base silhouette recoloured with source-in, so they match exactly.
-function spriteOf(type, variant) {
-  return cachedLayer('enemy:' + type + ':' + variant, SPRITE_PX, SPRITE_PX, (g) => {
-    if (variant === 'base') {
-      g.setTransform(SPRITE_RES, 0, 0, SPRITE_RES, SPRITE_PX / 2, SPRITE_PX / 2);
-      BODY[type](g, ENEMY_COLOR[type]);
+// Resolution of the enemy currently being drawn (set by draw.enemy before its type function runs).
+let curRes = 1;
+
+// Sprite for one paint at resolution `res`, with flash level `f` and telegraph level `g` baked in.
+// Level 0 is the plain paint. Overlays recolour the plain sprite (white for flash, danger for telegraph)
+// and draw it over, in the same order the live path used. Each combination is built once, lazily.
+function variantLayer(id, colour, paint, res, f, g) {
+  const w = Math.ceil(2 * SPRITE_HX * res);
+  const h = Math.ceil(2 * SPRITE_HY * res);
+  return cachedLayer('enemy:' + id + ':' + res + ':' + f + ':' + g, w, h, (out) => {
+    if (f === 0 && g === 0) {
+      out.setTransform(res, 0, 0, res, w / 2, h / 2);
+      paint(out, colour);
       return;
     }
-    const base = spriteOf(type, 'base');
-    if (!base) return;
-    g.drawImage(base, 0, 0);
-    g.globalCompositeOperation = 'source-in';
-    g.fillStyle = variant === 'flash' ? '#ffffff' : PALETTE.danger;
-    g.fillRect(0, 0, SPRITE_PX, SPRITE_PX);
+    const plain = variantLayer(id, colour, paint, res, 0, 0);
+    if (!plain) return;
+    out.drawImage(plain, 0, 0);
+    const overlay = (fill, alpha) => {
+      const tmp = makeCanvas(w, h);
+      if (!tmp) return;
+      const tg = tmp.getContext('2d');
+      tg.drawImage(plain, 0, 0);
+      tg.globalCompositeOperation = 'source-in';
+      tg.fillStyle = fill;
+      tg.fillRect(0, 0, w, h);
+      out.globalAlpha = alpha;
+      out.drawImage(tmp, 0, 0);
+      out.globalAlpha = 1;
+    };
+    if (f > 0) overlay('#ffffff', 0.9 * (f / FLASH_LEVELS));
+    if (g > 0) overlay(PALETTE.danger, 0.5 * (g / TELE_LEVELS));
   });
 }
 
-// Draws the static body with flash and telegraph applied. Falls back to live drawing
-// where offscreen canvases are unavailable.
-function drawBody(ctx, type, o) {
-  const base = spriteOf(type, 'base');
-  if (!base) {
-    BODY[type](ctx, tint(ENEMY_COLOR[type], o));
-    return;
-  }
-  const prev = ctx.globalAlpha;
+// Draws a sprite centred on the enemy origin, in the enemy's local units.
+function blitSprite(ctx, layer, res) {
+  const dw = Math.ceil(2 * SPRITE_HX * res) / res;
+  const dh = Math.ceil(2 * SPRITE_HY * res) / res;
   ctx.globalCompositeOperation = 'source-over';
-  ctx.drawImage(base, -SPRITE_HALF, -SPRITE_HALF, 2 * SPRITE_HALF, 2 * SPRITE_HALF);
-  if (o.flash > 0) {
-    ctx.globalAlpha = prev * o.flash * 0.9;
-    ctx.drawImage(spriteOf(type, 'flash'), -SPRITE_HALF, -SPRITE_HALF, 2 * SPRITE_HALF, 2 * SPRITE_HALF);
-  }
-  if (o.telegraph > 0) {
-    ctx.globalAlpha = prev * o.telegraph * 0.5;
-    ctx.drawImage(spriteOf(type, 'tele'), -SPRITE_HALF, -SPRITE_HALF, 2 * SPRITE_HALF, 2 * SPRITE_HALF);
-  }
-  ctx.globalAlpha = prev;
+  ctx.drawImage(layer, -dw / 2, -dh / 2, dw, dh);
 }
 
-// Drifter: tendrils behind the bell, then the bell body.
-function drawDrifter(ctx, t, o) {
-  const c = tint(ENEMY_COLOR.drifter, o);
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.lineCap = 'round';
-  for (let i = 0; i < 3; i++) {
-    const oy = (i - 1) * R * 0.5;
-    ctx.beginPath();
-    ctx.moveTo(-R * 0.2, oy);
-    ctx.quadraticCurveTo(-R * 0.9, oy + Math.sin(t * 4 + i * 2 + 1) * R * 0.25, -R * 1.6, oy + Math.sin(t * 4 + i * 2) * R * 0.35);
-    ctx.strokeStyle = rgba(c, 0.85);
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
+// Draws one baked layer for the enemy's current flash and telegraph levels.
+// Where offscreen canvases are unavailable, it paints the same geometry directly (live, unquantised).
+function drawLayer(ctx, id, colour, paint, o) {
+  const f = Math.round(o.flash * FLASH_LEVELS);
+  const g = Math.round(o.telegraph * TELE_LEVELS);
+  const layer = variantLayer(id, colour, paint, curRes, f, g);
+  if (!layer) {
+    ctx.save();
+    paint(ctx, tint(colour, o));
+    ctx.restore();
+    return;
   }
-  ctx.restore();
-  drawBody(ctx, 'drifter', o);
+  blitSprite(ctx, layer, curRes);
+}
+
+// Draws a layer with no flash or telegraph state (used for parts that stay in their own colour).
+function drawPlainLayer(ctx, id, colour, paint) {
+  const layer = variantLayer(id, colour, paint, curRes, 0, 0);
+  if (!layer) {
+    ctx.save();
+    paint(ctx, colour);
+    ctx.restore();
+    return;
+  }
+  blitSprite(ctx, layer, curRes);
+}
+
+// Drifter: tendrils behind the bell, then the bell. Tendrils use the nearest baked phase.
+function drawDrifter(ctx, t, o) {
+  const c = ENEMY_COLOR.drifter;
+  const cycle = ((t * 4) % TAU + TAU) % TAU;
+  const p = Math.round((cycle / TAU) * TENDRIL_PHASES) % TENDRIL_PHASES;
+  drawPlainLayer(ctx, 'drifter.tendrils.' + p, c, tendrilsPaint((p / TENDRIL_PHASES) * TAU));
+  drawLayer(ctx, 'drifter.body', c, BODY.drifter, o);
 }
 
 // Spitter: body, then a muzzle that glows as it winds up.
 function drawSpitter(ctx, t, o) {
   const c = tint(ENEMY_COLOR.spitter, o);
-  drawBody(ctx, 'spitter', o);
+  drawLayer(ctx, 'spitter', ENEMY_COLOR.spitter, BODY.spitter, o);
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   ctx.fillStyle = rgba(c, 0.25 + 0.6 * o.telegraph + 0.1 * Math.sin(t * 6));
@@ -612,36 +808,39 @@ function drawSpitter(ctx, t, o) {
 function drawCharger(ctx, t, o) {
   const tg = o.telegraph;
   if (tg > 0) {
+    // Dashed aim line as filled rectangles: dash paths are costly on the canvas.
+    const x0 = R * 1.6;
+    const len = R * 4.5 * tg;
+    const h = 1.2 + 1.2 * tg;
+    const period = 12; // 6 on, 6 off
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.setLineDash([6, 6]);
-    ctx.lineDashOffset = -t * 60;
-    ctx.beginPath();
-    ctx.moveTo(R * 1.6, 0);
-    ctx.lineTo(R * (1.6 + 4.5 * tg), 0);
-    ctx.strokeStyle = rgba(PALETTE.danger, 0.2 + 0.7 * tg);
-    ctx.lineWidth = 1.2 + 1.2 * tg;
-    ctx.stroke();
+    ctx.fillStyle = rgba(PALETTE.danger, 0.2 + 0.7 * tg);
+    const phase = ((t * 60) % period + period) % period;
+    for (let d = -phase; d < len; d += period) {
+      const from = Math.max(0, d);
+      const to = Math.min(len, d + 6);
+      if (to > from) ctx.fillRect(x0 + from, -h / 2, to - from, h);
+    }
     ctx.restore();
   }
   ctx.save();
   ctx.translate(-tg * R * 0.35, 0);
-  drawBody(ctx, 'charger', o);
+  drawLayer(ctx, 'charger', ENEMY_COLOR.charger, BODY.charger, o);
   ctx.restore();
 }
 
 // Shellback: a bright armoured front half and a dark back with a teal weak spot.
-// opts.hp below 3 shows cracks in the armour.
+// opts.hp below 3 shows cracks in the armour (one sprite per crack level).
 function drawShellback(ctx, t, o) {
-  const c = tint(ENEMY_COLOR.shellback, o);
-  const armour = tint('#c4d8ff', o);
+  const cracks = Math.max(0, Math.min(2, 3 - num(o.hp, 3)));
+  drawLayer(ctx, 'shellback.' + cracks, ENEMY_COLOR.shellback, (g, c) => BODY.shellback(g, c, cracks), o);
+
+  // The core sits on the back half, behind the armour, so it can be drawn after the body.
   const core = PALETTE.shellbackCore;
-
-  drawBody(ctx, 'shellback', o);
-
+  const beat = 0.6 + 0.4 * Math.sin(t * 4);
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  const beat = 0.6 + 0.4 * Math.sin(t * 4);
   ctx.fillStyle = rgba(core, 0.3 + 0.25 * beat);
   ctx.beginPath();
   ctx.arc(-R * 0.45, 0, R * 0.42, 0, TAU);
@@ -651,55 +850,16 @@ function drawShellback(ctx, t, o) {
   ctx.arc(-R * 0.45, 0, R * 0.16, 0, TAU);
   ctx.fill();
   ctx.restore();
-
-  // Armoured front: a half-disc closed across its diameter.
-  ctx.beginPath();
-  ctx.arc(0, 0, R * 1.02, -Math.PI / 2, Math.PI / 2);
-  ctx.closePath();
-  ctx.fillStyle = armour;
-  ctx.fill();
-  ctx.strokeStyle = rgba('#ffffff', 0.9);
-  ctx.lineWidth = 1.4;
-  ctx.stroke();
-
-  // Armour plate ribs.
-  ctx.strokeStyle = rgba(c, 0.6);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let i = -2; i <= 2; i++) {
-    const a = i * 0.45;
-    ctx.moveTo(R * 0.15 * Math.cos(a), R * 0.15 * Math.sin(a));
-    ctx.lineTo(R * 0.98 * Math.cos(a), R * 0.98 * Math.sin(a));
-  }
-  ctx.stroke();
-
-  const cracks = Math.max(0, Math.min(2, 3 - num(o.hp, 3)));
-  if (cracks > 0) {
-    ctx.strokeStyle = rgba(PALETTE.deepTop, 0.85);
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.moveTo(R * 0.3, -R * 0.8);
-    ctx.lineTo(R * 0.55, -R * 0.35);
-    ctx.lineTo(R * 0.4, -R * 0.05);
-    if (cracks > 1) {
-      ctx.moveTo(R * 0.55, -R * 0.35);
-      ctx.lineTo(R * 0.8, -R * 0.2);
-      ctx.moveTo(R * 0.4, R * 0.05);
-      ctx.lineTo(R * 0.7, R * 0.5);
-    }
-    ctx.stroke();
-  }
 }
 
 // Splitter: a hexagonal cell with three division lines. The halves pull apart as it readies.
 function drawSplitter(ctx, t, o) {
   const c = tint(ENEMY_COLOR.splitter, o);
-  const spin = t * 0.6;
   const sep = o.telegraph * R * 0.25;
 
   ctx.save();
-  ctx.rotate(spin);
-  drawBody(ctx, 'splitter', o);
+  ctx.rotate(t * 0.6);
+  drawLayer(ctx, 'splitter', ENEMY_COLOR.splitter, BODY.splitter, o);
   ctx.strokeStyle = rgba(mixHex(c, '#ffffff', 0.3), 0.9);
   ctx.lineWidth = 1.2;
   ctx.beginPath();
@@ -718,7 +878,7 @@ function drawSplitter(ctx, t, o) {
 
 // Mini: a small teardrop with a sparkle at its core.
 function drawMini(ctx, t, o) {
-  drawBody(ctx, 'mini', o);
+  drawLayer(ctx, 'mini', ENEMY_COLOR.mini, BODY.mini, o);
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   ctx.fillStyle = rgba('#ffffff', 0.4 + 0.3 * Math.sin(t * 10));
@@ -728,26 +888,12 @@ function drawMini(ctx, t, o) {
   ctx.restore();
 }
 
-// Mine: spikes behind the core, then the core body and a strobing centre that speeds up as it arms.
+// Mine: a spinning spiked core (the whole sprite rotates), and a strobing centre that speeds up as it arms.
 function drawMine(ctx, t, o) {
-  const c = tint(ENEMY_COLOR.mine, o);
-  const spin = t * 0.8;
-
   ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = rgba(c, 0.9);
-  ctx.lineWidth = 1.8;
-  ctx.beginPath();
-  for (let i = 0; i < 8; i++) {
-    const a = spin + (i * TAU) / 8;
-    ctx.moveTo(Math.cos(a) * R * 0.62, Math.sin(a) * R * 0.62);
-    ctx.lineTo(Math.cos(a) * R * 1.15, Math.sin(a) * R * 1.15);
-  }
-  ctx.stroke();
+  ctx.rotate(t * 0.8);
+  drawLayer(ctx, 'mine', ENEMY_COLOR.mine, BODY.mine, o);
   ctx.restore();
-
-  drawBody(ctx, 'mine', o);
 
   const rate = 4 + 26 * o.telegraph;
   const on = 0.5 + 0.5 * Math.sin(t * rate);
@@ -775,32 +921,27 @@ const ENEMY_DRAW = new Map([
 // ---------------------------------------------------------------------------
 
 export const draw = {
-  // Deep-sea gradient, vignette and arena border are cached. Motes and current lines animate.
+  // Deep-sea gradient, vignette and arena border are cached at device resolution.
+  // Current lines are cached with a 40 px margin so their shift stays inside the layer.
+  // Plankton is batched and animates every frame.
   background(ctx, w, h, t) {
     const time = num(t, 0);
-    const stat = cachedLayer('bg:' + w + 'x' + h, w, h, (g) => paintStaticBackground(g, w, h));
+    const { sx, sy } = scaleOf(ctx);
     ctx.save();
+
+    const stat = bgLayer('static', w, h, sx, sy, w, h, 0, 0, (g) => paintStaticBackground(g, w, h));
     if (stat) {
       ctx.drawImage(stat, 0, 0, w, h);
     } else {
       paintStaticBackground(ctx, w, h);
     }
 
-    // Current lines: the cached layer carries a 40 px margin, so the shift stays inside it.
-    const caustic = cachedLayer('caustic:' + w + 'x' + h, w + 80, h + 40, (g) => {
-      g.translate(40, 20);
-      paintCaustics(g, w, h, 0);
-    });
-    if (caustic) {
-      const ox = Math.sin(time * 0.09) * 24;
-      const oy = Math.cos(time * 0.07) * 10;
-      ctx.globalAlpha = 0.6;
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.drawImage(caustic, -40 + ox, -20 + oy);
-      ctx.globalAlpha = 1;
-    } else {
-      paintCaustics(ctx, w, h, time * 0.2);
-    }
+    // Current lines drift as a whole, as before. They are drawn live: a few thin strokes cost
+    // far less than a full-screen blend, and the cached layer was the main background cost.
+    ctx.globalAlpha = 0.6;
+    ctx.translate(Math.sin(time * 0.09) * 24, Math.cos(time * 0.07) * 10);
+    paintCaustics(ctx, w, h, 0);
+    ctx.globalAlpha = 1;
 
     drawMotes(ctx, w, h, time);
     ctx.restore();
@@ -816,6 +957,7 @@ export const draw = {
     if (fn === undefined) return;
     const o = readOpts(opts);
     const time = num(t, 0);
+    curRes = spriteRes(scaleOf(ctx).sx * o.scale);
     ctx.save();
     ctx.translate(num(x, 0), num(y, 0));
     ctx.rotate(num(angle, 0));
@@ -825,32 +967,79 @@ export const draw = {
     ctx.restore();
   },
 
-  // Amber by default, cyan when reflected. Both use a cached glow sprite.
+  // Enemy bullet: amber by default, cyan when reflected.
+  // A bright white-hot core, a strong glow, a pulsing outline, and a short trail.
+  // The trail needs opts.vx and opts.vy (the velocity); without them the bullet has no trail.
   bullet(ctx, x, y, t, opts) {
     const o = readOpts(opts);
     const time = num(t, 0);
-    const color = o.reflected ? PALETTE.player : PALETTE.bullet;
-    const breathe = 1 + 0.1 * Math.sin(time * 18 + num(x, 0) * 0.1);
-    const size = 26 * o.scale * breathe;
-    const sprite = glowSprite(o.reflected ? 'cyan' : 'amber', color);
+    const px = num(x, 0);
+    const py = num(y, 0);
+    const reflected = o.reflected;
+    const color = reflected ? PALETTE.player : PALETTE.bullet;
+    const key = reflected ? 'cyan' : 'amber';
+    const breathe = 1 + 0.08 * Math.sin(time * 18 + px * 0.1);
+    const pulse = 0.5 + 0.5 * Math.sin(time * 9 + px * 0.05 + py * 0.07);
+    const size = 36 * o.scale * breathe; // glow diameter
+    const glow = glowSprite(key, color);
+    const ring = ringSprite(key, color);
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    if (sprite) {
-      ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+
+    // Trail: three fading glow dots behind the bullet, against its velocity.
+    const vx = num(opts && opts.vx, 0);
+    const vy = num(opts && opts.vy, 0);
+    const speed = Math.hypot(vx, vy);
+    if (speed > 1) {
+      const ux = vx / speed;
+      const uy = vy / speed;
+      for (let i = 1; i <= 3; i++) {
+        const d = i * 4.5 * o.scale;
+        const s = size * (0.72 - 0.16 * i);
+        ctx.globalAlpha = 0.55 - 0.15 * i;
+        if (glow) {
+          ctx.drawImage(glow, px - ux * d - s / 2, py - uy * d - s / 2, s, s);
+        } else {
+          ctx.fillStyle = rgba(color, 1);
+          ctx.beginPath();
+          ctx.arc(px - ux * d, py - uy * d, s / 2, 0, TAU);
+          ctx.fill();
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Strong glow, then the pulsing outline, then the bright core.
+    if (glow) {
+      ctx.drawImage(glow, px - size / 2, py - size / 2, size, size);
     } else {
       const r = size / 2;
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+      const grad = ctx.createRadialGradient(px, py, 0, px, py, r);
       grad.addColorStop(0, rgba(color, 1));
       grad.addColorStop(1, rgba(color, 0));
       ctx.fillStyle = grad;
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, TAU);
+      ctx.arc(px, py, r, 0, TAU);
       ctx.fill();
     }
-    ctx.fillStyle = o.reflected ? PALETTE.dash : '#fff4d6';
+
+    const ringSize = size * (0.62 + 0.08 * pulse);
+    ctx.globalAlpha = 0.45 + 0.55 * pulse;
+    if (ring) {
+      ctx.drawImage(ring, px - ringSize / 2, py - ringSize / 2, ringSize, ringSize);
+    } else {
+      ctx.strokeStyle = rgba(color, 1);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(px, py, ringSize / 2, 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = reflected ? PALETTE.dash : '#fff8e6';
     ctx.beginPath();
-    ctx.arc(x, y, 2.4 * o.scale, 0, TAU);
+    ctx.arc(px, py, 3.4 * o.scale, 0, TAU);
     ctx.fill();
     ctx.restore();
   },

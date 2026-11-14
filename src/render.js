@@ -1,19 +1,33 @@
 // Presentation for one frame. Entities are drawn by src/art.js, particles, shake, flashes and floaters
-// by src/fx.js, and pulse shockwaves come from src/feedback.js. This module reads game and view state
-// and never writes into the simulation, so it can run at display rate while the sim steps at 120 Hz.
-import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, PULSE, SPAWN, ENEMY, PLAYER, DASH, RESTART_GATE } from './config.js';
-import { multiplierFor, comboWindowFor, dashPreview } from './game.js';
+// by src/fx.js, and pulse shockwaves come from src/feedback.js. The HUD and every menu are drawn by
+// src/hud.js. This module reads game and view state and never writes into the simulation, so it can run
+// at display rate while the sim steps at 120 Hz.
+import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, PULSE, SPAWN, ENEMY, PLAYER, DASH, ARENA } from './config.js';
+import { dashPreview } from './game.js';
 import { draw, PALETTE } from './art.js';
-import { dashMaxCharges } from './pickups.js'; // PICKUPS (#54)
-import { drawPickups, drawModifierHud } from './pickups-art.js'; // PICKUPS (#54)
+import { drawPickups } from './pickups-art.js'; // PICKUPS (#54)
+import {
+  DEFAULT_SETTINGS,
+  computeLayout,
+  createHud,
+  drawHudLayer,
+  hudRectsLogical,
+  clampOutOfRects,
+} from './hud.js';
 
 const FONT = '"Trebuchet MS", "Segoe UI", system-ui, sans-serif';
-const DIM = 'rgba(234, 255, 255, 0.6)';
 const TAU = Math.PI * 2;
 const SPAWN_POP_S = 0.3; // enemies grow in over this long after they appear
 const STAGGER_FLASH = 0.25; // white tint held for the whole stagger
 const START_FLASH_S = 0.15; // brighter flash at the moment a stagger lands
 const AIM_LINE_SPEED = 60; // dashes on the telegraph aim line scroll at this rate (px/s)
+const SPAWN_MARKER_SCALE = 0.8; // spawn markers are drawn at this scale of the enemy
+const ARENA_BOUNDS = Object.freeze({
+  minX: ARENA.inset,
+  minY: ARENA.inset,
+  maxX: W - ARENA.inset,
+  maxY: H - ARENA.inset,
+});
 
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -136,13 +150,16 @@ function drawAimLine(ctx, e, x, y, tg, t) {
   ctx.restore();
 }
 
-function drawWarnings(ctx, game, t) {
-  // A spawn marker is a faint ghost of the enemy that will appear, growing more solid as it nears.
+// A spawn marker is a faint ghost of the enemy that will appear, growing more solid as it nears. It is
+// moved off the HUD panels (avoid, in arena units) so a warning never sits under a readout.
+function drawWarnings(ctx, game, t, avoid) {
   for (const wn of game.warnings) {
     const k = clamp01(1 - wn.t / SPAWN.warning);
+    const r = (ENEMY[wn.kind]?.radius ?? 14) * SPAWN_MARKER_SCALE;
+    const at = clampOutOfRects(wn.x, wn.y, r, avoid, ARENA_BOUNDS);
     ctx.save();
     ctx.globalAlpha = 0.25 + 0.55 * k;
-    drawEnemy(ctx, wn.kind, ENEMY[wn.kind]?.radius ?? 14, wn.x, wn.y, 0, t, { scale: 0.8, telegraph: k });
+    drawEnemy(ctx, wn.kind, ENEMY[wn.kind]?.radius ?? 14, at.x, at.y, 0, t, { scale: SPAWN_MARKER_SCALE, telegraph: k });
     ctx.restore();
   }
 }
@@ -238,210 +255,29 @@ function drawRings(ctx, rings) {
   }
 }
 
-// ---- HUD and screens -------------------------------------------------------------------------------
-
-function drawHud(ctx, game, highScore) {
-  const c = game.combo;
-  const mult = multiplierFor(c.count);
-  const tierColor = PALETTE.combo[c.tier] ?? PALETTE.player;
-
-  ctx.save();
-  ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'left';
-  ctx.font = `600 13px ${FONT}`;
-  ctx.fillStyle = DIM;
-  ctx.fillText('SCORE', 28, 32);
-  ctx.font = `bold 40px ${FONT}`;
-  ctx.fillStyle = PALETTE.gold;
-  ctx.fillText(String(game.score), 28, 72);
-  const scoreWidth = ctx.measureText(String(game.score)).width;
-  ctx.font = `bold 26px ${FONT}`;
-  ctx.fillStyle = tierColor;
-  ctx.fillText(`x${mult}`, 28 + scoreWidth + 14, 72);
-
-  // Combo timer bar, coloured by tier.
-  const barW = 260;
-  const frac = c.count > 0 ? Math.max(0, Math.min(1, c.timer / comboWindowFor(c.count))) : 0;
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
-  ctx.fillRect(28, 88, barW, 8);
-  ctx.fillStyle = tierColor;
-  ctx.shadowColor = tierColor;
-  ctx.shadowBlur = 10;
-  ctx.fillRect(28, 88, barW * frac, 8);
-  ctx.shadowBlur = 0;
-  if (c.count > 0) {
-    ctx.font = `600 15px ${FONT}`;
-    ctx.fillText(`COMBO ${c.count}`, 28, 120);
-  }
-  drawModifierHud(ctx, game); // PICKUPS (#54): active modifiers with countdown bars
-
-  // Top right: wave and best.
-  ctx.textAlign = 'right';
-  ctx.font = `600 13px ${FONT}`;
-  ctx.fillStyle = DIM;
-  ctx.fillText('WAVE', W - 28, 32);
-  ctx.font = `bold 40px ${FONT}`;
-  ctx.fillStyle = PALETTE.player;
-  ctx.fillText(String(game.wave.number), W - 28, 72);
-  ctx.font = `600 15px ${FONT}`;
-  ctx.fillStyle = DIM;
-  ctx.fillText(`BEST ${highScore}`, W - 28, 100);
-
-  // Bottom left: hit points.
-  for (let i = 0; i < PLAYER.maxHp; i++) {
-    const hx = 40 + i * 34;
-    const hy = H - 40;
-    ctx.beginPath();
-    ctx.arc(hx, hy, 11, 0, TAU);
-    if (i < game.player.hp) {
-      ctx.fillStyle = PALETTE.player;
-      ctx.shadowColor = PALETTE.player;
-      ctx.shadowBlur = 10;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    } else {
-      ctx.strokeStyle = PALETTE.danger;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-  }
-
-  // Bottom centre: dash charge pips. The pip being recharged fills as its timer runs.
-  const d = game.player.dash;
-  ctx.textAlign = 'center';
-  const maxCharges = dashMaxCharges(game); // PICKUPS (#54): 4 pips while Spark Coral is active
-  for (let i = 0; i < maxCharges; i++) {
-    const px = W / 2 - ((maxCharges - 1) * 52) / 2 + i * 52;
-    const py = H - 42;
-    const ready = i < d.charges;
-    const recharging = i === d.charges && d.charges < maxCharges;
-    ctx.save();
-    ctx.translate(px, py);
-    ctx.rotate(Math.PI / 4);
-    ctx.strokeStyle = PALETTE.dash;
-    ctx.lineWidth = 2;
-    if (ready) {
-      ctx.fillStyle = PALETTE.dash;
-      ctx.shadowColor = PALETTE.dash;
-      ctx.shadowBlur = 10;
-      ctx.fillRect(-9, -9, 18, 18);
-    } else {
-      ctx.strokeRect(-9, -9, 18, 18);
-      if (recharging) {
-        ctx.fillStyle = 'rgba(234, 255, 255, 0.5)';
-        const f = Math.min(1, d.recharge / DASH.rechargeTime);
-        ctx.fillRect(-9, 9 - 18 * f, 18, 18 * f);
-      }
-    }
-    ctx.restore();
-  }
-  ctx.font = `600 12px ${FONT}`;
-  ctx.fillStyle = 'rgba(234, 255, 255, 0.5)';
-  ctx.fillText('DASH', W / 2, H - 14);
-
-  // Bottom right: pulse cooldown ring.
-  const cdFrac = game.player.pulseCooldown > 0 ? 1 - game.player.pulseCooldown / PULSE.cooldown : 1;
-  const rx = W - 62;
-  const ry = H - 52;
-  ctx.beginPath();
-  ctx.arc(rx, ry, 20, 0, TAU);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
-  ctx.lineWidth = 4;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(rx, ry, 20, -Math.PI / 2, -Math.PI / 2 + TAU * cdFrac);
-  ctx.strokeStyle = cdFrac >= 1 ? PALETTE.gold : PALETTE.player;
-  ctx.stroke();
-  ctx.font = `600 12px ${FONT}`;
-  ctx.fillStyle = 'rgba(234, 255, 255, 0.5)';
-  ctx.fillText('PULSE', rx, H - 14);
-  ctx.restore();
+// The letterbox bands around the arena: the same deep-sea gradient, drawn in window pixels.
+function drawBands(ctx, L) {
+  const g = ctx.createLinearGradient(0, 0, 0, L.winH);
+  g.addColorStop(0, PALETTE.deepTop);
+  g.addColorStop(1, PALETTE.deepBottom);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, L.winW, L.winH);
 }
 
-function centred(ctx, text, x, y, font, color) {
-  ctx.font = font;
-  ctx.fillStyle = color;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, x, y);
-}
-
-function dim(ctx, alpha) {
-  ctx.fillStyle = `rgba(2, 5, 13, ${alpha})`;
-  ctx.fillRect(0, 0, W, H);
-}
-
-function drawMuted(ctx) {
-  ctx.save();
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  ctx.font = `600 13px ${FONT}`;
-  ctx.fillStyle = DIM;
-  ctx.fillText('MUTED (M)', W / 2, 32);
-  ctx.restore();
-}
-
-function drawTitle(ctx, view) {
-  dim(ctx, 0.5);
-  ctx.save();
-  ctx.shadowColor = PALETTE.player;
-  ctx.shadowBlur = 30;
-  centred(ctx, 'RIPTIDE RUSH', W / 2, 220, `bold 96px ${FONT}`, PALETTE.player);
-  ctx.restore();
-  centred(ctx, 'Dash through everything. Every kill refunds a charge.', W / 2, 300, `24px ${FONT}`, PALETTE.dash);
-
-  const lines = [
-    ['WASD / Arrows', 'swim'],
-    ['Mouse', 'aim'],
-    ['Left click / Space', 'dash-slash toward the cursor'],
-    ['Right click / Shift', 'pulse: reflect bullets, stagger enemies'],
-    ['Esc / P', 'pause'],
-    ['M', 'mute'],
-  ];
-  ctx.font = `18px ${FONT}`;
-  lines.forEach(([keys, what], i) => {
-    const y = 380 + i * 30;
-    ctx.textAlign = 'right';
-    ctx.fillStyle = PALETTE.gold;
-    ctx.fillText(keys, W / 2 - 14, y);
-    ctx.textAlign = 'left';
-    ctx.fillStyle = 'rgba(234, 255, 255, 0.8)';
-    ctx.fillText(what, W / 2 + 14, y);
-  });
-
-  const blink = 0.55 + 0.45 * Math.sin(view.time * 4);
-  ctx.globalAlpha = blink;
-  centred(ctx, 'Click or press Space to dive in', W / 2, 600, `bold 26px ${FONT}`, PALETTE.gold);
-  ctx.globalAlpha = 1;
-  centred(ctx, `Best: ${view.highScore}`, W / 2, 648, `20px ${FONT}`, DIM);
-}
-
-function drawPaused(ctx) {
-  dim(ctx, 0.55);
-  centred(ctx, 'PAUSED', W / 2, H / 2 - 20, `bold 72px ${FONT}`, PALETTE.player);
-  centred(ctx, 'Esc, P or click to resume', W / 2, H / 2 + 40, `22px ${FONT}`, PALETTE.dash);
-}
-
-function drawGameOver(ctx, view) {
-  dim(ctx, 0.6);
-  centred(ctx, 'WRECKED', W / 2, H / 2 - 110, `bold 88px ${FONT}`, PALETTE.danger);
-  centred(ctx, `Score  ${view.game.score}`, W / 2, H / 2 - 20, `bold 44px ${FONT}`, PALETTE.gold);
-  if (view.newBest) {
-    centred(ctx, 'NEW BEST!', W / 2, H / 2 + 34, `bold 26px ${FONT}`, PALETTE.combo[1]);
-  } else {
-    centred(ctx, `Best  ${view.highScore}`, W / 2, H / 2 + 34, `24px ${FONT}`, 'rgba(234, 255, 255, 0.7)');
-  }
-  if (view.overAge >= RESTART_GATE) {
-    const blink = 0.55 + 0.45 * Math.sin(view.time * 5);
-    ctx.globalAlpha = blink;
-    centred(ctx, 'Click, Space or R to dive again', W / 2, H / 2 + 100, `bold 22px ${FONT}`, PALETTE.dash);
-    ctx.globalAlpha = 1;
-  }
-}
-
-// view:{ screen, game, alpha, time, dt, highScore, newBest, overAge, muted, fx, rings }
+// view:{ screen, game, alpha, time, dt, highScore, newBest, overAge, muted, fx, rings, layout, hud, settings, menuRow }
+// `layout` comes from computeLayout(); without it the canvas size is used, which is what the tests do.
 export function drawFrame(ctx, view) {
-  ctx.setTransform(ctx.canvas.width / W, 0, 0, ctx.canvas.height / H, 0, 0);
+  const L = view.layout ?? computeLayout(ctx.canvas.width, ctx.canvas.height);
+  const dev = ctx.canvas.width / L.winW; // device pixels per CSS px
+  const settings = view.settings ?? DEFAULT_SETTINGS;
+  const hud = view.hud ?? createHud();
+
+  ctx.setTransform(dev, 0, 0, dev, 0, 0);
+  drawBands(ctx, L);
+
+  // The arena, letterboxed in the middle of the window.
+  const k = dev * L.s;
+  ctx.setTransform(k, 0, 0, k, dev * L.px, dev * L.py);
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
   draw.background(ctx, W, H, view.time);
@@ -449,10 +285,12 @@ export function drawFrame(ctx, view) {
   const { game, screen, fx } = view;
   if (screen !== 'title' && game) {
     // The shake offsets the world (entities, pulses, particles), not the HUD or the arena backdrop.
+    // The Screen shake option scales it: 100%, 50% or 0%.
     const shake = fx.getShakeOffset();
     ctx.save();
-    ctx.translate(shake.x, shake.y);
-    drawWarnings(ctx, game, view.time);
+    ctx.translate(shake.x * settings.shake, shake.y * settings.shake);
+    const avoid = hudRectsLogical(L, Object.keys(game.modifiers).length);
+    drawWarnings(ctx, game, view.time, avoid);
     drawPickups(ctx, game, view.alpha, view.time); // PICKUPS (#54): pickups, shield aura, pickup fx
     drawEnemies(ctx, game, view);
     drawBullets(ctx, game, view);
@@ -461,12 +299,11 @@ export function drawFrame(ctx, view) {
     drawRings(ctx, view.rings);
     fx.drawWorld(ctx);
     ctx.restore();
-    fx.drawScreen(ctx, W, H);
-    drawHud(ctx, game, view.highScore);
+    // Reduced flashes: no full-screen flash or vignette pulse.
+    if (!settings.reducedFlashes) fx.drawScreen(ctx, W, H);
   }
 
-  if (screen === 'title') drawTitle(ctx, view);
-  if (screen === 'paused') drawPaused(ctx);
-  if (screen === 'over') drawGameOver(ctx, view);
-  if (view.muted) drawMuted(ctx);
+  // HUD, title, pause and game-over screens, in window pixels, scaled by L.hs and not by the arena.
+  ctx.setTransform(dev, 0, 0, dev, 0, 0);
+  drawHudLayer(ctx, L, { ...view, hud, settings, muted: settings.muted, menuRow: view.menuRow ?? 0 });
 }

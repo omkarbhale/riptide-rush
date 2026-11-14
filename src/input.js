@@ -13,15 +13,24 @@ const MOVE_KEYS = {
   ArrowRight: [1, 0],
 };
 
-// Actions: dash, pulse, pause, confirm (menus: start, resume, restart).
+// Actions: dash, pulse, pause, confirm (start, resume, restart), select (Enter: the option under the cursor
+// on the pause screen), and up/down/left/right (menu navigation; the game ignores them).
 const KEY_ACTIONS = {
   Space: ['dash', 'confirm'],
   ShiftLeft: ['pulse'],
   ShiftRight: ['pulse'],
   Escape: ['pause'],
   KeyP: ['pause'],
-  Enter: ['confirm'],
+  Enter: ['select'],
   KeyR: ['confirm'],
+  ArrowUp: ['up'],
+  KeyW: ['up'],
+  ArrowDown: ['down'],
+  KeyS: ['down'],
+  ArrowLeft: ['left'],
+  KeyA: ['left'],
+  ArrowRight: ['right'],
+  KeyD: ['right'],
 };
 
 const MOUSE_ACTIONS = {
@@ -60,19 +69,24 @@ export function createActionBuffer(windowSeconds = INPUT_BUFFER) {
   };
 }
 
-export function createInput(canvas) {
+// options.mapPoint(clientX, clientY) -> { x, y } in logical arena space. Defaults to the canvas rectangle,
+// which is right only when the canvas is the arena; main.js passes the letterbox mapping.
+// options.claimPointer(button, clientX, clientY) -> true when a menu took the click, so no action is queued.
+export function createInput(canvas, options = {}) {
   const held = new Set();
   const edges = [];
   const buffer = createActionBuffer();
   const aim = { x: LOGICAL_WIDTH / 2, y: LOGICAL_HEIGHT / 2 };
-
-  const toLogical = (e) => {
-    const r = canvas.getBoundingClientRect();
-    return {
-      x: ((e.clientX - r.left) * LOGICAL_WIDTH) / r.width,
-      y: ((e.clientY - r.top) * LOGICAL_HEIGHT) / r.height,
-    };
-  };
+  const mapPoint =
+    options.mapPoint ??
+    ((clientX, clientY) => {
+      const r = canvas.getBoundingClientRect();
+      return {
+        x: ((clientX - r.left) * LOGICAL_WIDTH) / r.width,
+        y: ((clientY - r.top) * LOGICAL_HEIGHT) / r.height,
+      };
+    });
+  const claimPointer = options.claimPointer ?? (() => false);
 
   const onKeyDown = (e) => {
     if (PREVENT_DEFAULT.has(e.code)) e.preventDefault();
@@ -86,12 +100,13 @@ export function createInput(canvas) {
     held.clear();
   };
   const onMouseMove = (e) => {
-    Object.assign(aim, toLogical(e));
+    Object.assign(aim, mapPoint(e.clientX, e.clientY));
   };
   const onMouseDown = (e) => {
+    Object.assign(aim, mapPoint(e.clientX, e.clientY));
+    if (claimPointer(e.button, e.clientX, e.clientY)) return;
     const actions = MOUSE_ACTIONS[e.button];
     if (!actions) return;
-    Object.assign(aim, toLogical(e));
     edges.push(...actions);
   };
   const onContextMenu = (e) => e.preventDefault();
