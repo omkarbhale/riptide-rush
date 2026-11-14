@@ -23,7 +23,23 @@ import {
 const DERIVED_TYPES = ['chargeReady', 'spawnWarning', 'multiKill', 'multiKillEnd', 'uiStart', 'uiClick'];
 
 // Sound names that two different event types may share on purpose. Empty: every event has its own sound (#128).
-const SHARED_ON_PURPOSE = Object.freeze({});
+// Sounds deliberately shared by a family of events. SOUND_NAMES is fixed (audio.test.js), so the #114 enemy
+// events reuse existing sounds: each list names every event that plays that sound, and the reason is the family.
+const SHARED_ON_PURPOSE = Object.freeze({
+  dash: ['dash', 'puddleDispel'], // a dash clearing an ink puddle is the dash whoosh, quieter
+  kill: ['kill', 'bossHit'], // a boss hit is a heavy kill thud
+  perfectPulse: ['perfectPulse', 'lobReflect', 'bossStun'], // every perfect pulse is the perfect-pulse sound
+  reflect: ['reflect', 'bearerHit', 'barrierBreak', 'lobDeflect', 'eelStun'], // a clang: a barrier, a deflect, a stun
+  comboTierUp: ['comboTier', 'bossDown'], // a rising chime
+  waveStart: ['waveStart', 'bossIntro', 'bossPhase'], // the wave-start sting, for the Warden's arrival and phases
+  enemyShoot: ['enemyShoot', 'lobThrow', 'lureSpawn'], // a shot leaving an enemy
+  chargerTelegraph: ['chargerTelegraph', 'puffSwell', 'eelRipple', 'bossTelegraph'], // a warning whine
+  chargerLunge: ['chargerLunge', 'eelSurface', 'eelBite'], // a rip or lunge
+  mineArm: ['mineArm', 'lobLand'], // a soft arming tone or thud
+  mineExplode: ['mineExplode', 'puffBurst'], // a burst
+  uiClick: ['eelHide', 'uiClick'], // a quiet tick
+  spawnWarn: ['bossExpose', 'spawnWarning'], // the spawn warning tick, for the weak point opening
+});
 
 // Recording stubs for the audio and effects modules. Every method the feedback layer calls is here.
 function recorder() {
