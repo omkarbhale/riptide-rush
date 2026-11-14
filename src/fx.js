@@ -94,7 +94,7 @@ export const FX_PRESETS = Object.freeze({
       { count: 8, shape: 'shard', color: '#ffe066', speed: 260, life: 0.6, size: 5, drag: 3 },
     ],
     shake: 0.3,
-    slowmo: [0.3, 220],
+    // No slowmo here: the sim owns the perfect-pulse slow-motion (game.slowmo, #104). A second time scale would stack.
     flash: ['#eaffff', 0.2],
   },
   spawn: {
@@ -144,6 +144,12 @@ function makeParticle() {
     rot: 0,
     spin: 0,
     r1: 0,
+    // Inward (collapse) particles follow a fixed radial line from (cx, cy) along (ux, uy), at distance r1 * (1 - u)^2.
+    implode: false,
+    cx: 0,
+    cy: 0,
+    ux: 0,
+    uy: 0,
   };
 }
 
@@ -261,6 +267,7 @@ export function createFx(options = {}) {
       p.color = pick(color);
       p.rot = a;
       p.spin = (random() - 0.5) * 12;
+      p.implode = false; // a recycled slot may have been a collapse particle
       if (shape === SHAPE_RING) {
         // Rings hold position and expand: r1 is the final radius.
         p.vx = 0;
@@ -272,6 +279,44 @@ export function createFx(options = {}) {
         p.vy = Math.sin(a) * sp;
         p.r1 = 0;
       }
+    }
+  }
+
+  // Inward burst (DESIGN §5 gameover_implode, #56). Particles start on a ring of radius `opts.collapse` around
+  // (x, y) and move in to the centre over their life: slowly at the rim, fast at the end. Shape 'ring' has no inward
+  // form, so it is drawn as dots. Quality steps thin it out the same way as burst().
+  function collapse(x, y, opts = {}) {
+    const want = Math.max(0, Math.floor(opts.count ?? 12));
+    const count = want === 0 ? 0 : Math.max(1, Math.floor(want * FX_QUALITY_BURST_SCALE[quality]));
+    const named = SHAPES[opts.shape ?? 'dot'];
+    const shape = named === undefined || named === SHAPE_RING ? SHAPE_DOT : named;
+    const radius = Math.max(1, Number(opts.collapse) || 0);
+    const life = Math.max(0.01, opts.life ?? 0.5);
+    const size = opts.size ?? 3;
+    const color = opts.color ?? '#ffffff';
+    for (let i = 0; i < count; i++) {
+      const p = allocParticle();
+      const a = random() * TAU;
+      const r = radius * (0.85 + 0.3 * random());
+      p.shape = shape;
+      p.age = 0;
+      p.life = life * (0.8 + 0.4 * random());
+      p.size = size * (0.75 + 0.5 * random());
+      p.gravity = 0;
+      p.drag = 0;
+      p.color = pick(color);
+      p.rot = a + Math.PI;
+      p.spin = 0;
+      p.vx = 0;
+      p.vy = 0;
+      p.r1 = r;
+      p.implode = true;
+      p.cx = x;
+      p.cy = y;
+      p.ux = Math.cos(a);
+      p.uy = Math.sin(a);
+      p.x = x + p.ux * r;
+      p.y = y + p.uy * r;
     }
   }
 
@@ -496,6 +541,18 @@ export function createFx(options = {}) {
           pLive--;
           continue;
         }
+        if (p.implode) {
+          // Distance r * (1 - u)^2 along a fixed radial line: slow at the rim, fast as it lands.
+          const f = 1 - p.age / p.life;
+          const speed = (-2 * p.r1 * f) / p.life; // d(distance)/dt, negative (inward)
+          const dist = p.r1 * f * f;
+          p.x = p.cx + p.ux * dist;
+          p.y = p.cy + p.uy * dist;
+          p.vx = p.ux * speed;
+          p.vy = p.uy * speed;
+          p.rot = Math.atan2(p.vy, p.vx);
+          continue;
+        }
         if (p.shape !== SHAPE_RING) {
           if (p.drag > 0) {
             const k = Math.exp(-p.drag * sd);
@@ -715,6 +772,7 @@ export function createFx(options = {}) {
 
   return {
     burst,
+    collapse,
     trail,
     floater,
     shake,

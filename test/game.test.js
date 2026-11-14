@@ -725,6 +725,10 @@ const KNOWN = new Set([
   'spitWindup', 'chargerTelegraph', 'chargerLunge',
   // The one-time hint (#84).
   'hint',
+  // #114: the second round of enemies (enemies-extra.js).
+  'puffSwell', 'puffBurst', 'bearerHit', 'barrierBreak', 'lobThrow', 'lobLand', 'lobReflect', 'lobDeflect',
+  'puddleDispel', 'eelRipple', 'eelSurface', 'eelBite', 'eelHide', 'eelStun', 'lureSpawn', 'bossIntro',
+  'bossTelegraph', 'bossExpose', 'bossHit', 'bossPhase', 'bossStun', 'bossDown',
 ]);
 
 const finite = (g) => {
@@ -732,6 +736,9 @@ const finite = (g) => {
   const vals = [p.x, p.y, p.vx, p.vy, g.score, g.combo.timer, p.dash.charges];
   for (const e of g.enemies) vals.push(e.x, e.y, e.vx, e.vy, e.facing, e.stagger, e.grace);
   for (const b of g.bullets) vals.push(b.x, b.y, b.vx, b.vy);
+  for (const s of g.extras.shards) vals.push(s.x, s.y, s.vx, s.vy);
+  for (const s of g.extras.shells) vals.push(s.x, s.y, s.t);
+  for (const pd of g.extras.puddles) vals.push(pd.x, pd.y, pd.t);
   return vals.every((v) => Number.isFinite(v));
 };
 
@@ -810,12 +817,13 @@ test('60 simulated seconds of scripted random input from wave 1: no NaN, no exce
 });
 
 test('60 simulated seconds from the script’s waves cover every enemy kind with no NaN and no exceptions', () => {
-  // Waves 1 (drifters), 8 (spitters, shellbacks), and 19 (chargers, splitters, mines) between them
-  // script every kind. Each soak restarts at its own start wave after a death.
+  // Waves 1 (drifters, chargers), 8 (spitters, shellbacks, the Warden at 10), 12 (puffers, shieldbearers,
+  // ink squids) and 16 (eels, mines, splitters) between them script every kind (#114 added the last five).
+  // Each soak restarts at its own start wave after a death. 30 s each is enough for every kind to appear.
   const seen = new Set();
   let kills = 0;
-  for (const startWave of [1, 8, 19]) {
-    const result = soak(31 + startWave, startWave, 60);
+  for (const startWave of [1, 8, 12, 16]) {
+    const result = soak(31 + startWave, startWave, 30);
     result.kinds.forEach((k) => seen.add(k));
     kills += result.kills;
   }
