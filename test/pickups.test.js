@@ -16,6 +16,7 @@ import {
   spawnEnemy,
   killEnemy,
   damagePlayer,
+  dashPreview,
 } from '../src/game.js';
 import { dashMaxCharges, healChance, healPlayer, MODIFIER_KINDS } from '../src/pickups.js';
 
@@ -36,6 +37,11 @@ function place(g, x, y) {
 function seconds(g, s, input = NONE) {
   const n = Math.round(s / SIM_DT);
   for (let i = 0; i < n; i++) update(g, input, SIM_DT);
+}
+
+// Steps until the active dash ends. Frenzy makes the dash longer in time at the same speed.
+function finishDash(g) {
+  for (let i = 0; i < 60 && g.player.dash.active; i++) update(g, NONE, SIM_DT);
 }
 
 // Adds a pickup to the field directly, with no pop, so tests control where it sits.
@@ -235,7 +241,7 @@ test('Frenzy recharges dash charges 3x faster and adds 25% to dash distance, for
   const h = quiet();
   place(h, 300, H / 2);
   update(h, dashAt(900, H / 2), SIM_DT);
-  seconds(h, 14 * SIM_DT);
+  finishDash(h);
   assert.equal(h.player.dash.active, null, 'baseline dash finished');
   near(h.player.x - 300, DASH.distance, 1e-6, 'baseline dash distance');
 
@@ -243,7 +249,7 @@ test('Frenzy recharges dash charges 3x faster and adds 25% to dash distance, for
   place(f, 300, H / 2);
   f.modifiers.frenzy = MODIFIER.frenzy.duration;
   update(f, dashAt(900, H / 2), SIM_DT);
-  seconds(f, 14 * SIM_DT);
+  finishDash(f);
   assert.equal(f.player.dash.active, null, 'Frenzy dash finished');
   near(f.player.x - 300, DASH.distance * (1 + MODIFIER.frenzy.dashDistanceBonus), 1e-6, 'Frenzy dash distance');
 
@@ -287,7 +293,7 @@ test('Shield Scale absorbs exactly one hit, with no HP lost and no normal invuln
   place(g, 600, 360);
   g.modifiers.shieldScale = MODIFIER.shieldScale.duration;
 
-  assert.equal(damagePlayer(g, 560, 360), false, 'the first hit is absorbed');
+  assert.equal(damagePlayer(g, 560, 360), true, 'the attack connects and the shield takes it');
   assert.equal(g.player.hp, PLAYER.maxHp, 'no HP lost');
   assert.equal(g.player.invuln, 0, 'normal hit invulnerability is not triggered');
   assert.equal(g.modifiers.shieldScale, undefined, 'shield is used up');
@@ -434,4 +440,41 @@ test('healPlayer restores up to max and never above it', () => {
   healPlayer(g, 0, 0, 'drop');
   healPlayer(g, 0, 0, 'drop');
   assert.equal(g.player.hp, PLAYER.maxHp);
+});
+
+test('Frenzy widens the lunge window: dashPreview and the real dash both use the 25% longer distance', () => {
+  const g = quiet();
+  place(g, 300, H / 2);
+  const e = spawnEnemy(g, 'drifter', 600, H / 2); // 300 px ahead on the aim line
+  e.stagger = 100; // keep it still
+  // Without Frenzy the lunge reach is DASH.lungeMaxDistance (275 px), so 300 px is out of reach.
+  assert.equal(dashPreview(g, 900, H / 2).assisted, false, 'no Frenzy: 300 px is beyond reach');
+  g.modifiers.frenzy = MODIFIER.frenzy.duration;
+  const pv = dashPreview(g, 900, H / 2);
+  assert.equal(pv.assisted, true, 'Frenzy: the reach grows to about 344 px, so the dash is extended to it');
+  near(pv.x, 600, 1e-6, 'preview end point');
+  update(g, dashAt(900, H / 2), SIM_DT);
+  finishDash(g);
+  near(g.player.x, 600, 1e-6, 'the real dash ends where the preview said');
+});
+
+test('Shield Scale only absorbs a hit that would land: grace and i-frames leave the shield for later', () => {
+  const g = quiet();
+  place(g, 600, 360);
+  g.modifiers.shieldScale = MODIFIER.shieldScale.duration;
+
+  g.player.dashGrace = 0.2;
+  assert.equal(damagePlayer(g, 560, 360), false, 'dash grace blocks the hit');
+  assert.ok(g.modifiers.shieldScale > 0, 'the shield is not spent on a blocked hit');
+  assert.equal(takeEvents(g, 'shieldBreak').length, 0);
+
+  g.player.dashGrace = 0;
+  g.player.invuln = 0.5;
+  assert.equal(damagePlayer(g, 560, 360), false, 'post-hit invulnerability blocks the hit');
+  assert.ok(g.modifiers.shieldScale > 0, 'still not spent');
+
+  g.player.invuln = 0;
+  assert.equal(damagePlayer(g, 560, 360), true, 'a hit that would land is absorbed');
+  assert.equal(g.modifiers.shieldScale, undefined, 'now it is spent');
+  assert.equal(g.player.hp, PLAYER.maxHp, 'no HP lost');
 });

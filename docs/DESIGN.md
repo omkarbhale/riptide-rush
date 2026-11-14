@@ -81,7 +81,13 @@ The beginner's game uses the same rules. The only difference is how many dashes 
 | Trigger | Left click or Space | #1 |
 | Travel distance | 210 px, fixed, regardless of cursor distance | #1 |
 | Duration | 0.12 s (implied speed 1750 px/s) | #1 |
-| Path kill width | An enemy dies if it is within its radius + 24 px of the path | proposed |
+| Path kill width | An enemy dies if it is within its radius + 26 px (blade) of the path. The body is 14 px, so the blade is longer than the body | proposed (blade 26 px) |
+| Closing slash arc | At dash end, enemies within 46 px of the end point in the forward half-circle die (and enemy bullets there are cut) | proposed |
+| Lunge assist | If the nearest enemy within ±12° of the aim line is 210–275 px out and within blade reach, the dash extends along the aim line to pass through it. Same speed, slightly longer duration. Never shortened or re-aimed | proposed |
+| Exit grace | Invulnerable for 0.18 s after a dash that killed nothing; 0.25 s after one that did (each kill refreshes it). Shown as a fading afterglow | proposed |
+| Bullet cut | Enemy bullets on the dash path or inside the closing arc are destroyed: +5 points, no combo, no charge refund | proposed |
+| Dash whiff | A dash that kills nothing but passes within 60 px of an enemy emits a whiff event so effects can show it | proposed |
+| Aim preview | A reticle at the end point the next dash would reach, brighter (gold) when it would kill | proposed |
 | Invulnerability | Entire 0.12 s duration | #1 |
 | Charges | 3 maximum | #1 |
 | Recharge per charge | 0.9 s, one charge at a time, timer runs only while below 3 | #1 |
@@ -125,6 +131,9 @@ The beginner's game uses the same rules. The only difference is how many dashes 
 | Death | HP reaches 0 → DEAD state (§4.1) | #1 |
 | Restart | R or click; death-to-playable under 300 ms | #1 |
 | Combo on hit | Being hurt does not reset the combo; only timer expiry does | proposed |
+| Contact reach | A non-lunging enemy hurts only inside its radius + 8 px player core, so grazes are safe. A charger hurts only while lunging (full body reach) | proposed (core 8 px) |
+| Spawn safety | A newly spawned enemy cannot hurt for its first 0.4 s | proposed |
+| Post-dash grace | No damage for 0.18 s after a dash, 0.25 s if it killed (see §3.3) | proposed |
 
 Damage sources: enemy bullets (1), Drifter contact (1, Drifter dies), Charger lunge contact (1), Shellback contact outside a dash (1, Shellback continues), Splitter contact outside a dash (1, Splitter splits as on death with no score), Mini contact (1, mini dies), Mine blast (1).
 
@@ -279,7 +288,7 @@ CHASE --(contact with Rip, Rip not dashing)--> DEAD (hurts Rip 1)
 ```
 SPAWN_WARN --> SPAWN --> KEEP_DISTANCE
 KEEP_DISTANCE: holds 260–340 px from Rip; fires every 2.2 s
-KEEP_DISTANCE --(fire timer)--> AIM (0.4 s aim line, thin, amber)
+KEEP_DISTANCE --(fire timer, only while Rip is not dashing and 0.15 s have passed since a dash ended; otherwise it waits)--> AIM (0.35 s wind-up, thin amber aim line locked at its start, telegraph rises 0 to 1; a dash holds the wind-up)
 AIM --> FIRE (bullet at 230 px/s) --> KEEP_DISTANCE
 KEEP_DISTANCE --(pulse)--> STAGGER (0.8 s; firing paused)
 STAGGER --> KEEP_DISTANCE
@@ -348,6 +357,7 @@ SPAWNED (from Spitter, speed 230 px/s, lifetime 4 s)
   --(inside pulse radius)--> REFLECTED (speed 360 px/s, travels back toward the enemy that fired it)
   --(hits Rip, Rip not dashing)--> REMOVED (hurts Rip 1)
   --(lifetime 0 or off arena)--> REMOVED
+  --(on the dash path or in the closing arc)--> REMOVED (cut by the dash: +5 points, no combo, no charge refund)
 REFLECTED --(hits enemy)--> REMOVED (kill, base score of that enemy)
 REFLECTED --(off arena)--> REMOVED
 ```
