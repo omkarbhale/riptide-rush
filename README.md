@@ -9,9 +9,9 @@
 [![Play](https://img.shields.io/badge/play-in%20your%20browser-3cf2ff?style=for-the-badge)](https://omkarbhale.github.io/riptide-rush/)
 [![CI](https://github.com/omkarbhale/riptide-rush/actions/workflows/ci.yml/badge.svg)](https://github.com/omkarbhale/riptide-rush/actions/workflows/ci.yml)
 
-<a href="https://omkarbhale.github.io/riptide-rush/"><img src="assets/readme/gameplay.gif" width="800" alt="Real gameplay at wave 12: Rip dashes through schools of Drifters, leaving white dash trails and multi-kill score bursts"></a>
+<a href="https://omkarbhale.github.io/riptide-rush/"><img src="assets/readme/gameplay.gif" width="800" alt="Real gameplay at waves 12 and 13: Rip dashes through schools of Drifters, leaving white dash trails and multi-kill score bursts"></a>
 
-<sub>Real gameplay from the current build, wave 12. Free, no install, runs on desktop, phone and gamepad.</sub>
+<sub>Real gameplay from the current build, waves 12 and 13. Free, no install, runs on desktop, phone and gamepad.</sub>
 
 </div>
 
