@@ -9,12 +9,15 @@ import {
   DASH,
   PULSE,
   COMBO,
+  HITSTOP,
   SPAWN,
   ENEMY,
 } from './config.js';
+import { planWave, spawnQueue } from './waves.js';
 
 const W = LOGICAL_WIDTH;
 const H = LOGICAL_HEIGHT;
+const TAU = Math.PI * 2;
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -23,11 +26,22 @@ function unit(dx, dy) {
   return len > 1e-9 ? [dx / len, dy / len] : [0, 0];
 }
 
+// Wraps an angle into (-PI, PI].
+function wrapAngle(a) {
+  return a - TAU * Math.round(a / TAU);
+}
+
 // Blend a velocity toward a target. `rate` is the fraction per step (already multiplied by dt).
 function steer(e, tx, ty, rate) {
   const k = Math.min(1, rate);
   e.vx += (tx - e.vx) * k;
   e.vy += (ty - e.vy) * k;
+}
+
+// Chase the player at `speed`, blending velocity at `rate` per second.
+function chase(e, game, dt, speed, rate) {
+  const [ux, uy] = unit(game.player.x - e.x, game.player.y - e.y);
+  steer(e, ux * speed, uy * speed, rate * dt);
 }
 
 // Deterministic PRNG (mulberry32). The simulation's only source of randomness.
@@ -59,9 +73,16 @@ export function multiplierFor(count) {
   return Math.min(COMBO.multiplierCap, 1 + Math.floor(count / COMBO.multiplierStep));
 }
 
-// Combo timer length for a combo count: 2.5 s, shrinking slightly with combo, never below 1.6 s.
+// Combo timer length for a combo count. It starts at 2.5 s at x1 and shrinks linearly with the
+// multiplier to a floor of 1.6 s at x10 (issue #11). Above x10 it stays at the floor.
 export function comboWindowFor(count) {
-  return Math.max(COMBO.windowMin, COMBO.window - COMBO.windowShrinkPerCombo * count);
+  const t = (multiplierFor(count) - 1) / (COMBO.multiplierCap - 1); // 0 at x1, 1 at x10
+  return COMBO.window * (1 - t) + COMBO.windowMin * t;
+}
+
+// Hit-stop for a kill, in ms: 40 for a single kill, +10 for each further kill in one slash, cap 100.
+export function hitStopFor(slashIndex) {
+  return Math.min(HITSTOP.max, HITSTOP.single + HITSTOP.perExtraKill * (slashIndex - 1));
 }
 
 // Colour tier index (0 = cyan ... 4 = white) for a combo count.
@@ -73,46 +94,31 @@ export function tierFor(count) {
   return tier;
 }
 
-export function spawnIntervalFor(wave) {
-  return Math.max(SPAWN.minInterval, SPAWN.baseInterval - SPAWN.intervalStep * (wave - 1));
-}
-
-export function spawnCountFor(wave) {
-  return 1 + Math.floor((wave - 1) / 4);
-}
-
-// Spawn weights for a wave. A kind only appears once its minWave is reached.
-export function kindWeights(wave) {
-  const weights = {};
-  for (const [kind, def] of Object.entries(ENEMY_KINDS)) {
-    if (def.minWave <= wave) weights[kind] = def.weight;
-  }
-  return weights;
-}
-
-// Behaviour table. Each kind: radius, points, minWave, weight, init(e, game), think(e, game, dt),
-// and optional onStagger(e) and dashKillable(e, dash). think() only sets velocity; the shared
-// integrator moves the enemy and clamps it to the arena.
+// Behaviour table. Each kind: radius, points, init(e, game), think(e, game, dt), and optional:
+//   onStagger(e, game)   called when a Pulse staggers it
+//   staggerTime          seconds of stagger (default PULSE.stagger)
+//   staggerable: false   Pulse has no effect (mines)
+//   dashHit(game, e, d, x, y) -> 'kill' | 'deflect' | 'ignore'   (default 'kill')
+//   onDeath(game, e)     runs when the enemy leaves play by any cause that kills it
+//   dieOnContact         a contact hit that lands also removes the enemy (no score)
+//   contact: false       never hurts by touching
+//   lifetime             seconds, then the enemy fades silently (no score, no combo)
+//   graceTime            seconds after spawn during which contact cannot hurt Rip
+// think() only sets velocity; the shared integrator moves the enemy and clamps it to the arena.
 export const ENEMY_KINDS = {
   drifter: {
     radius: ENEMY.drifter.radius,
     points: ENEMY.drifter.points,
-    minWave: ENEMY.drifter.minWave,
-    weight: ENEMY.drifter.weight,
     init() {},
     think(e, game, dt) {
-      const c = ENEMY.drifter;
-      const [ux, uy] = unit(game.player.x - e.x, game.player.y - e.y);
-      steer(e, ux * c.speed, uy * c.speed, c.steer * dt);
+      chase(e, game, dt, ENEMY.drifter.speed, ENEMY.drifter.steer);
     },
   },
 
   spitter: {
     radius: ENEMY.spitter.radius,
     points: ENEMY.spitter.points,
-    minWave: ENEMY.spitter.minWave,
-    weight: ENEMY.spitter.weight,
-    init(e, game) {
+    init(e) {
       e.shotCd = ENEMY.spitter.firstShotDelay;
     },
     think(e, game, dt) {
@@ -135,7 +141,7 @@ export const ENEMY_KINDS = {
       steer(e, dx * c.speed, dy * c.speed, 4 * dt);
 
       e.shotCd -= dt;
-      if (e.shotCd <= 0 && dist <= c.fireRange) {
+      if (e.shotCd <= 0 && dist <= c.fireRange && entityCount(game) < SPAWN.maxEntities) {
         e.shotCd = c.fireInterval;
         const off = e.r + c.bulletRadius + 2;
         fireBullet(game, e.x + ux * off, e.y + uy * off, ux * c.bulletSpeed, uy * c.bulletSpeed);
@@ -146,8 +152,6 @@ export const ENEMY_KINDS = {
   charger: {
     radius: ENEMY.charger.radius,
     points: ENEMY.charger.points,
-    minWave: ENEMY.charger.minWave,
-    weight: ENEMY.charger.weight,
     init(e, game) {
       const c = ENEMY.charger;
       e.state = 'idle';
@@ -199,10 +203,97 @@ export const ENEMY_KINDS = {
       }
     },
   },
+
+  // Armoured front arc. A dash that reaches the front bounces Rip back; from the side or behind it
+  // kills. A Pulse drops the armour for a while, and any dash kills while it is down.
+  shellback: {
+    radius: ENEMY.shellback.radius,
+    points: ENEMY.shellback.points,
+    staggerTime: ENEMY.shellback.staggerTime,
+    init(e, game) {
+      e.facing = Math.atan2(game.player.y - e.y, game.player.x - e.x);
+    },
+    think(e, game, dt) {
+      const c = ENEMY.shellback;
+      const want = Math.atan2(game.player.y - e.y, game.player.x - e.x);
+      const limit = c.turnRate * dt;
+      e.facing = wrapAngle(e.facing + clamp(wrapAngle(want - e.facing), -limit, limit));
+      steer(e, Math.cos(e.facing) * c.speed, Math.sin(e.facing) * c.speed, 4 * dt);
+    },
+    dashHit(game, e, d, x, y) {
+      if (e.stagger > 0) return 'kill';
+      const fromCentre = Math.atan2(y - e.y, x - e.x);
+      return Math.abs(wrapAngle(fromCentre - e.facing)) <= ENEMY.shellback.armorHalfAngle ? 'deflect' : 'kill';
+    },
+    onStagger(e, game) {
+      game.events.push({ type: 'stagger', x: e.x, y: e.y });
+    },
+  },
+
+  // Dies into three minis. Contact that lands also splits it, with no score.
+  splitter: {
+    radius: ENEMY.splitter.radius,
+    points: ENEMY.splitter.points,
+    dieOnContact: true,
+    init() {},
+    think(e, game, dt) {
+      chase(e, game, dt, ENEMY.splitter.speed, ENEMY.splitter.steer);
+    },
+    onDeath(game, e) {
+      const c = ENEMY.splitter;
+      for (const a of c.splitAngles) {
+        if (entityCount(game) >= SPAWN.maxEntities) break;
+        const x = e.x + Math.cos(a) * c.splitOffset;
+        const y = e.y + Math.sin(a) * c.splitOffset;
+        spawnEnemy(game, 'mini', x, y, e.wave);
+      }
+    },
+  },
+
+  // Fast and short-lived. Spawn grace means it cannot hurt Rip for its first moments.
+  mini: {
+    radius: ENEMY.mini.radius,
+    points: ENEMY.mini.points,
+    lifetime: ENEMY.mini.lifetime,
+    graceTime: ENEMY.mini.graceTime,
+    dieOnContact: true,
+    init() {},
+    think(e, game, dt) {
+      chase(e, game, dt, ENEMY.mini.speed, ENEMY.mini.steer);
+    },
+  },
+
+  // Stationary. Arms when Rip comes near, then detonates. Only a dash touches it; Pulse ignores it.
+  mine: {
+    radius: ENEMY.mine.radius,
+    points: ENEMY.mine.points,
+    contact: false,
+    staggerable: false,
+    init(e) {
+      e.state = 'idle';
+      e.stateT = 0;
+    },
+    think(e, game, dt) {
+      const c = ENEMY.mine;
+      e.vx = 0;
+      e.vy = 0;
+      if (e.state === 'idle') {
+        if (Math.hypot(game.player.x - e.x, game.player.y - e.y) <= c.armRange) {
+          e.state = 'armed';
+          e.stateT = c.fuse;
+          game.events.push({ type: 'mineArm', x: e.x, y: e.y });
+        }
+      } else {
+        e.stateT -= dt;
+        if (e.stateT <= 0) detonateMine(game, e);
+      }
+    },
+  },
 };
 
+// options: { spawning, startWave } . startWave lets tests and soaks begin at any wave of the script.
 export function createGame(seed = 1, options = {}) {
-  return {
+  const game = {
     seed,
     rng: mulberry32(seed),
     spawning: options.spawning !== false,
@@ -226,14 +317,17 @@ export function createGame(seed = 1, options = {}) {
       invuln: 0,
       pulseCooldown: 0,
       dash: { charges: DASH.maxCharges, recharge: 0, active: null },
+      bounce: null,
     },
     enemies: [],
     bullets: [],
     warnings: [],
     combo: { count: 0, timer: 0, tier: 0 },
-    wave: { number: 1, timer: SPAWN.waveDuration, spawnTimer: SPAWN.firstSpawnDelay },
-    events: [{ type: 'waveStart', wave: 1 }],
+    wave: { number: 0, phase: 'active', timer: 0, queue: [], nextSpawnAt: 0 },
+    events: [],
   };
+  beginWave(game, options.startWave ?? 1);
+  return game;
 }
 
 // Returns the queued events and clears the queue.
@@ -270,9 +364,10 @@ export function update(game, input, dt) {
   tickRecharge(game, dt);
 
   if (input.pulse && p.pulseCooldown <= 0) firePulse(game);
-  if (input.dash && !p.dash.active && p.dash.charges >= 1) startDash(game, input);
+  if (input.dash && !p.dash.active && !p.bounce && p.dash.charges >= 1) startDash(game, input);
 
   if (p.dash.active) stepDash(game, dt);
+  else if (p.bounce) stepBounce(game, dt);
   else stepMove(game, input, dt);
 
   const aimX = input.aimX ?? p.x;
@@ -333,15 +428,18 @@ function tickRecharge(game, dt) {
 // Every kill: +1 combo, timer reset, score = base x multiplier (combo after this kill),
 // plus a multi-kill bonus for the 2nd+ kill of one slash, and an immediate dash charge refund.
 // `slashIndex` is 1-based: which kill this is within the current dash or pulse.
-export function killEnemy(game, e, slashIndex = 1) {
+// `cause` says how it died: 'dash', 'defuse' (a mine dashed through), 'reflect' or 'blast'.
+// The kill event carries `bonus` (the multi-kill points) and `hitStopMs` so feedback can scale.
+export function killEnemy(game, e, slashIndex = 1, cause = 'dash') {
   if (!e.alive) return;
   e.alive = false;
+  const def = ENEMY_KINDS[e.kind];
   const c = game.combo;
   c.count += 1;
   c.timer = comboWindowFor(c.count);
   const mult = multiplierFor(c.count);
-  let points = ENEMY_KINDS[e.kind].points * mult;
-  if (slashIndex > 1) points += COMBO.multiBonus * mult;
+  const bonus = slashIndex > 1 ? COMBO.multiBonus * mult : 0;
+  const points = def.points * mult + bonus;
   game.score += points;
   game.kills += 1;
   const d = game.player.dash;
@@ -354,8 +452,12 @@ export function killEnemy(game, e, slashIndex = 1) {
     enemyType: e.kind,
     combo: c.count,
     multi: slashIndex,
+    bonus,
     points,
+    hitStopMs: hitStopFor(slashIndex),
+    cause,
   });
+  if (def.onDeath) def.onDeath(game, e);
 }
 
 // ---- Dash -----------------------------------------------------------------------------------
@@ -381,6 +483,7 @@ function startDash(game, input) {
     dirX: dx,
     dirY: dy,
     kills: 0,
+    deflected: false,
   };
   p.facing = Math.atan2(dy, dx);
   game.events.push({ type: 'dash', x: p.x, y: p.y, angle: p.facing });
@@ -394,6 +497,11 @@ function stepDash(game, dt) {
   const x = d.sx + (d.ex - d.sx) * k;
   const y = d.sy + (d.ey - d.sy) * k;
   sweepDash(game, d, x, y);
+  if (d.deflected) {
+    // Rip is still at the last point the dash cleared, so the bounce starts from there.
+    startBounce(game, d);
+    return;
+  }
   p.x = x;
   p.y = y;
   if (d.t >= d.dur) {
@@ -406,19 +514,63 @@ function stepDash(game, dt) {
   }
 }
 
-// Kills every enemy the dash path crossed since the last step (segment test, not a point test).
+// Checks every enemy the dash path crossed since the last step (segment test, not a point test).
+// A kill is a kill; a Shellback's armour turns the dash into a deflect, which ends the dash.
+// It walks only the enemies that existed at the start of the step, so a splitter's minis are not
+// caught by the dash that split it.
 function sweepDash(game, d, x, y) {
-  for (const e of game.enemies) {
+  const n = game.enemies.length;
+  for (let i = 0; i < n; i++) {
+    const e = game.enemies[i];
     if (!e.alive) continue;
+    if (!segmentHitsCircle(d.lastX, d.lastY, x, y, e.x, e.y, e.r + PLAYER.radius)) continue;
     const def = ENEMY_KINDS[e.kind];
-    if (def.dashKillable && !def.dashKillable(e, d)) continue;
-    if (segmentHitsCircle(d.lastX, d.lastY, x, y, e.x, e.y, e.r + PLAYER.radius)) {
+    const verdict = def.dashHit ? def.dashHit(game, e, d, x, y) : 'kill';
+    if (verdict === 'deflect') {
+      d.deflected = true;
+      game.events.push({ type: 'deflect', x, y });
+      return; // d.lastX stays at the last clear point
+    }
+    if (verdict === 'kill') {
       d.kills += 1;
-      killEnemy(game, e, d.kills);
+      killEnemy(game, e, d.kills, e.kind === 'mine' ? 'defuse' : 'dash');
     }
   }
   d.lastX = x;
   d.lastY = y;
+}
+
+// A deflected dash ends at once. Rip bounces DASH.bounceDistance back along the dash, invulnerable.
+function startBounce(game, d) {
+  const p = game.player;
+  p.dash.active = null;
+  const sx = p.x;
+  const sy = p.y;
+  p.bounce = {
+    t: 0,
+    dur: DASH.bounceTime,
+    sx,
+    sy,
+    ex: sx - d.dirX * DASH.bounceDistance,
+    ey: sy - d.dirY * DASH.bounceDistance,
+  };
+  p.invuln = Math.max(p.invuln, DASH.bounceTime);
+  p.vx = 0;
+  p.vy = 0;
+}
+
+function stepBounce(game, dt) {
+  const p = game.player;
+  const b = p.bounce;
+  b.t = Math.min(b.dur, b.t + dt);
+  const k = b.t / b.dur;
+  const [x, y] = clampToArena(b.sx + (b.ex - b.sx) * k, b.sy + (b.ey - b.sy) * k, PLAYER.radius);
+  p.x = x;
+  p.y = y;
+  p.vx = 0;
+  p.vy = 0;
+  p.invuln = Math.max(p.invuln, b.dur - b.t);
+  if (b.t >= b.dur) p.bounce = null;
 }
 
 // ---- Movement -------------------------------------------------------------------------------
@@ -484,7 +636,8 @@ function firePulse(game) {
   }
 
   for (const e of game.enemies) {
-    if (e.alive && Math.hypot(e.x - p.x, e.y - p.y) <= PULSE.radius + e.r) staggerEnemy(e);
+    if (!e.alive || ENEMY_KINDS[e.kind].staggerable === false) continue;
+    if (Math.hypot(e.x - p.x, e.y - p.y) <= PULSE.radius + e.r) staggerEnemy(game, e);
   }
 
   if (perfect) {
@@ -494,19 +647,25 @@ function firePulse(game) {
   }
 }
 
-function staggerEnemy(e) {
-  e.stagger = PULSE.stagger;
+function staggerEnemy(game, e) {
   const def = ENEMY_KINDS[e.kind];
-  if (def.onStagger) def.onStagger(e);
+  e.stagger = def.staggerTime ?? PULSE.stagger;
+  if (def.onStagger) def.onStagger(e, game);
 }
 
 // ---- Enemies, bullets and spawning ----------------------------------------------------------
 
-export function spawnEnemy(game, kind, x, y) {
+// Live entities the cap counts: enemies, spawn warnings and bullets.
+function entityCount(game) {
+  return game.enemies.length + game.warnings.length + game.bullets.length;
+}
+
+export function spawnEnemy(game, kind, x, y, wave = game.wave.number) {
   const def = ENEMY_KINDS[kind];
   const e = {
     id: game.nextId++,
     kind,
+    wave,
     x,
     y,
     px: x,
@@ -517,6 +676,8 @@ export function spawnEnemy(game, kind, x, y) {
     alive: true,
     stagger: 0,
     age: 0,
+    grace: def.graceTime ?? 0,
+    facing: 0,
     hitWall: false,
     state: 'idle',
     stateT: 0,
@@ -549,14 +710,20 @@ function fireBullet(game, x, y, vx, vy) {
 
 function updateEnemy(game, e, dt) {
   if (!e.alive) return;
+  const def = ENEMY_KINDS[e.kind];
   e.age += dt;
+  if (def.lifetime !== undefined && e.age >= def.lifetime) {
+    e.alive = false;
+    return;
+  }
+  if (e.grace > 0) e.grace = Math.max(0, e.grace - dt);
   if (e.stagger > 0) {
     e.stagger = Math.max(0, e.stagger - dt);
     const f = Math.exp(-6 * dt);
     e.vx *= f;
     e.vy *= f;
   } else {
-    ENEMY_KINDS[e.kind].think(e, game, dt);
+    def.think(e, game, dt);
   }
   e.x += e.vx * dt;
   e.y += e.vy * dt;
@@ -587,11 +754,37 @@ function bulletsHitPlayer(game) {
   }
 }
 
+// Contact hurts Rip unless the enemy is in its spawn grace. A splitter or mini that lands its hit
+// is removed (a splitter also splits); neither scores.
 function enemiesTouchPlayer(game) {
   const p = game.player;
-  for (const e of game.enemies) {
-    if (e.alive && Math.hypot(e.x - p.x, e.y - p.y) < e.r + PLAYER.radius) {
-      damagePlayer(game, e.x, e.y);
+  const n = game.enemies.length;
+  for (let i = 0; i < n; i++) {
+    const e = game.enemies[i];
+    const def = ENEMY_KINDS[e.kind];
+    if (!e.alive || def.contact === false || e.grace > 0) continue;
+    if (Math.hypot(e.x - p.x, e.y - p.y) < e.r + PLAYER.radius && damagePlayer(game, e.x, e.y) && def.dieOnContact) {
+      e.alive = false;
+      if (def.onDeath) def.onDeath(game, e);
+    }
+  }
+}
+
+// A mine detonates: it hurts Rip if the blast reaches them, and kills every other enemy inside it.
+// Kills from the blast score and count for combo like any other kill. A mine it kills does not
+// detonate in turn.
+function detonateMine(game, e) {
+  const c = ENEMY.mine;
+  e.alive = false;
+  game.events.push({ type: 'mineExplode', x: e.x, y: e.y });
+  const p = game.player;
+  if (Math.hypot(p.x - e.x, p.y - e.y) <= c.blastRadius + PLAYER.radius) damagePlayer(game, e.x, e.y);
+  const n = game.enemies.length;
+  for (let i = 0; i < n; i++) {
+    const other = game.enemies[i];
+    if (!other.alive || other === e) continue;
+    if (Math.hypot(other.x - e.x, other.y - e.y) <= c.blastRadius + other.r) {
+      killEnemy(game, other, 1, 'blast');
     }
   }
 }
@@ -605,7 +798,7 @@ function reflectedBulletsHitEnemies(game) {
       if (segmentHitsCircle(b.px, b.py, b.x, b.y, e.x, e.y, e.r + b.r)) {
         b.alive = false;
         game.burstKills += 1;
-        killEnemy(game, e, game.burstKills);
+        killEnemy(game, e, game.burstKills, 'reflect');
         break;
       }
     }
@@ -630,48 +823,57 @@ export function damagePlayer(game, fromX, fromY) {
   return true;
 }
 
-function updateSpawner(game, dt) {
+// ---- Wave script ------------------------------------------------------------------------------
+
+// Starts wave `number`: plans it from the script and queues its spawns. The first spawn waits
+// SPAWN.groupLeadIn so the banner lands first.
+function beginWave(game, number) {
   const w = game.wave;
-  w.timer -= dt;
-  if (w.timer <= 0) {
-    w.number += 1;
-    w.timer += SPAWN.waveDuration;
-    game.events.push({ type: 'waveStart', wave: w.number });
+  w.number = number;
+  w.phase = 'active';
+  w.queue = spawnQueue(planWave(number));
+  w.nextSpawnAt = game.time + SPAWN.groupLeadIn;
+  game.events.push({ type: 'waveStart', wave: number });
+}
+
+// The wave state machine. Active: release queued enemies one at a time, as warnings, once their gap
+// has passed and the entity cap has room. A wave clears when its queue is empty and every enemy it
+// spawned is dead. Then comes the breather, and the next wave starts after it.
+function updateSpawner(game, dt) {
+  if (!game.spawning) return;
+  const w = game.wave;
+
+  if (w.phase === 'breather') {
+    w.timer -= dt;
+    if (w.timer <= 0) beginWave(game, w.number + 1);
+    return;
   }
 
-  if (game.spawning) {
-    w.spawnTimer -= dt;
-    if (w.spawnTimer <= 0) {
-      w.spawnTimer += spawnIntervalFor(w.number);
-      for (let i = 0; i < spawnCountFor(w.number); i++) {
-        if (game.enemies.length + game.warnings.length >= SPAWN.maxAlive) break;
-        const kind = pickKind(game, w.number);
-        const [x, y] = spawnPoint(game);
-        game.warnings.push({ kind, x, y, t: SPAWN.warning });
-      }
-    }
+  if (w.queue.length > 0 && game.time >= w.nextSpawnAt && entityCount(game) < SPAWN.maxEntities) {
+    const entry = w.queue.shift();
+    // The first minute teaches chaining with Drifters only: a scripted kind becomes a Drifter.
+    const kind = game.time < SPAWN.drifterOnlyUntil ? 'drifter' : entry.kind;
+    const [x, y] = spawnPoint(game);
+    game.warnings.push({ kind, x, y, t: SPAWN.warning, wave: w.number });
+    w.nextSpawnAt = game.time + entry.gap;
   }
 
-  // Warnings count down; the enemy appears when its marker expires.
   for (const wn of game.warnings) wn.t -= dt;
   const due = game.warnings.filter((wn) => wn.t <= 0);
   if (due.length > 0) {
     game.warnings = game.warnings.filter((wn) => wn.t > 0);
-    for (const wn of due) spawnEnemy(game, wn.kind, wn.x, wn.y);
+    for (const wn of due) spawnEnemy(game, wn.kind, wn.x, wn.y, wn.wave);
   }
-}
 
-function pickKind(game, wave) {
-  const weights = kindWeights(wave);
-  const kinds = Object.keys(weights);
-  let total = 0;
-  for (const k of kinds) total += weights[k];
-  let r = game.rng() * total;
-  for (const k of kinds) {
-    r -= weights[k];
-    if (r < 0) return k;
+  const pending =
+    w.queue.length > 0 ||
+    game.warnings.some((wn) => wn.wave === w.number) ||
+    game.enemies.some((e) => e.alive && e.wave === w.number);
+  if (!pending) {
+    game.events.push({ type: 'waveClear', wave: w.number });
+    w.phase = 'breather';
+    w.timer = SPAWN.breather;
   }
-  return kinds[0];
 }
 
 // A point on the arena edge at least minDistFromPlayer from the player (12 tries, then the last one).
