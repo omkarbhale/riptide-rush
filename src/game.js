@@ -198,7 +198,8 @@ export const ENEMY_KINDS = {
     init() {},
     think(e, game, dt) {
       const c = ENEMY.drifter;
-      const speed = e.lureSpeed ?? moveSpeed(e, c.speed); // #114: a Warden's lure dives at its own speed
+      // #114: a Warden's lure dives at its own speed. The mode's drift scale applies to every Drifter speed.
+      const speed = (e.lureSpeed ?? moveSpeed(e, c.speed)) * game.rules.driftSpeedScale;
       const far = Math.hypot(game.player.x - e.x, game.player.y - e.y) > c.chaseRange;
       if (e.school && far) holdSlot(e, game, dt, speed);
       else chase(e, game, dt, speed, c.steer);
@@ -414,7 +415,7 @@ export const ENEMY_KINDS = {
         // Armed by Rip coming near, or by itself after selfArmTime so an idle mine cannot stall a wave (#83).
         if (Math.hypot(game.player.x - e.x, game.player.y - e.y) <= c.armRange || e.age >= c.selfArmTime) {
           e.state = 'armed';
-          e.stateT = c.fuse;
+          e.stateT = game.rules.mineFuse;
           game.events.push({ type: 'mineArm', x: e.x, y: e.y });
         }
       } else {
@@ -425,17 +426,30 @@ export const ENEMY_KINDS = {
   },
 };
 
+// Rule overrides a mode can apply (src/modes.js). Anything not given keeps the config value.
+// maxHp: hit points; maxCharges: dash charges; mineFuse: seconds from arming to detonation;
+// driftSpeedScale: multiplies Drifter and school speed; pulse: false disables Pulse input entirely.
+const DEFAULT_RULES = Object.freeze({
+  maxHp: PLAYER.maxHp,
+  maxCharges: DASH.maxCharges,
+  mineFuse: ENEMY.mine.fuse,
+  driftSpeedScale: 1,
+  pulse: true,
+});
+
 // #114: the second round of enemy kinds, registered as one table (see enemies-extra.js).
 Object.assign(ENEMY_KINDS, EXTRA_KINDS);
 
 // Ops the extra enemies use from this module (enemies-extra.js never imports game.js).
 const EXTRA_OPS = { killEnemy, damagePlayer, spawnEnemy, healPlayer, entityCount, moveSpeed };
 
-// options: { spawning, startWave } . startWave lets tests and soaks begin at any wave of the script.
+// options: { spawning, startWave, rules } . startWave lets tests and soaks begin at any wave of the script.
 export function createGame(seed = 1, options = {}) {
+  const rules = { ...DEFAULT_RULES, ...(options.rules ?? {}) };
   const game = {
     seed,
     rng: mulberry32(seed),
+    rules,
     spawning: options.spawning !== false,
     time: 0,
     step: 0,
@@ -455,14 +469,15 @@ export function createGame(seed = 1, options = {}) {
       vx: 0,
       vy: 0,
       facing: 0,
-      hp: PLAYER.maxHp,
+      maxHp: rules.maxHp,
+      hp: rules.maxHp,
       invuln: 0,
       dashGrace: 0,        // seconds of invulnerability left after a dash (afterglow for the renderer)
       sinceDash: ENEMY.spitter.postDashQuiet, // seconds since the last dash ended (starts quiet)
       aimX: W / 2,         // last aim point, for the renderer's aim preview
       aimY: H / 2,
       pulseCooldown: 0,
-      dash: { charges: DASH.maxCharges, recharge: 0, active: null },
+      dash: { charges: rules.maxCharges, recharge: 0, active: null },
       bounce: null,
     },
     enemies: [],
@@ -519,7 +534,7 @@ export function update(game, input, dt) {
   tickCombo(game, dt);
   tickRecharge(game, dt);
 
-  if (input.pulse && p.pulseCooldown <= 0) firePulse(game);
+  if (input.pulse && p.pulseCooldown <= 0 && game.rules.pulse) firePulse(game);
   if (input.dash && !p.dash.active && !p.bounce && p.dash.charges >= 1) startDash(game, input);
 
   const dashing = Boolean(p.dash.active);
@@ -1279,7 +1294,7 @@ function placeSchool(game, kind, size, wave) {
     x: ax,
     y: ay,
     heading,
-    speed: ENEMY.drifter.speed * ENEMY.drifter.schoolSpeed * speedScaleFor(wave),
+    speed: ENEMY.drifter.speed * ENEMY.drifter.schoolSpeed * speedScaleFor(wave) * game.rules.driftSpeedScale,
     wave,
   };
   game.schools.push(school);

@@ -6,6 +6,7 @@ import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, PULSE, SPAWN, ENEMY, PLAYER, D
 import { dashPreview } from './game.js';
 import { draw, PALETTE } from './art.js';
 import { drawPickups } from './pickups-art.js'; // PICKUPS (#54)
+import { drawModesLayer } from './modes-ui.js'; // mode picker, mode label, daily share prompt (#124)
 import {
   DEFAULT_SETTINGS,
   computeLayout,
@@ -1053,5 +1054,6 @@ export function drawFrame(ctx, view) {
   ctx.setTransform(dev, 0, 0, dev, 0, 0);
   drawHudLayer(ctx, L, { ...view, hud, settings, muted: settings.muted, menuRow: view.menuRow ?? 0 });
   if (screen === 'playing' && game) drawBossIntro(ctx, L, bossState, view.time); // #129: the Warden's arrival
+  drawModesLayer(ctx, L, view);
   lap('hud');
 }
