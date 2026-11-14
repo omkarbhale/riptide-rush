@@ -64,6 +64,7 @@ const app = {
   daily: { official: null, plays: 0 },
   official: false, // the last run was today's official Daily Tide result
   share: null, // { state: 'pending' | 'copied' | 'fallback', at } for the share prompt
+  tapClaimUntil: 0, // performance.now() until which the tap that just hit a button does not also act (see tapClaimed)
   lastRun: { score: 0, wave: 0, combo: 0 },
   newBest: false,
   overAge: 0,
@@ -164,6 +165,33 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// A touch does not reach claimPointer: the touch layer turns a quick tap into 'confirm' when the finger lifts.
+// So a touch on the mode picker or the share button is handled here, and the tap that follows it is claimed.
+const TAP_CLAIM_MS = 500;
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType !== 'touch') return;
+  const p = cssPoint(e.clientX, e.clientY);
+  let claimed = false;
+  if (app.screen === 'title') {
+    const hit = modesHit(app.layout, 'title', p.x, p.y, modesView());
+    if (hit?.kind === 'mode') {
+      selectMode(hit.id);
+      claimed = true;
+    }
+  } else if (app.screen === 'over') {
+    if (modesHit(app.layout, 'over', p.x, p.y, modesView())?.kind === 'share') {
+      share();
+      claimed = true;
+    }
+  }
+  if (claimed) app.tapClaimUntil = performance.now() + TAP_CLAIM_MS;
+});
+
+// True for the confirm that a touch on a claimed button produces, so the tap neither starts nor restarts a run.
+function tapClaimed(action) {
+  return (action === 'confirm' || action === 'select') && performance.now() < app.tapClaimUntil;
+}
+
 // ---- pointer mapping ------------------------------------------------------------------------------
 // The canvas covers the window; the arena sits inside it letterboxed. Input maps a click to arena space.
 function cssPoint(clientX, clientY) {
@@ -259,6 +287,7 @@ function endRun(score, peakCombo) {
 function handleAction(action) {
   switch (app.screen) {
     case 'title':
+      if (tapClaimed(action)) break;
       if (action === 'confirm' || action === 'select') startRun();
       else if (action === 'left') cycleMode(-1);
       else if (action === 'right') cycleMode(1);
@@ -277,6 +306,7 @@ function handleAction(action) {
       } else if (action === 'select') changeSettings(activateSetting(app.settings, OPTION_ROWS[app.menuRow]));
       break;
     case 'over':
+      if (tapClaimed(action)) break;
       if ((action === 'confirm' || action === 'select') && app.overAge >= RESTART_GATE) startRun();
       break;
     default:
