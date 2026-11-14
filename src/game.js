@@ -1218,8 +1218,14 @@ function updateSpawner(game, dt) {
     game.liveWaves = game.liveWaves.filter((r) => r !== rec);
     game.events.push({ type: 'waveClear', wave: rec.number });
     if (rec.number === w.number && w.phase === 'active') {
-      w.phase = 'breather';
-      w.timer = rec.release ? SPAWN.breather : 0; // a non-release wave that cleared early hands over at once
+      if (rec.release) {
+        w.phase = 'breather';
+        w.timer = SPAWN.breather;
+      } else {
+        // A non-release wave that clears hands over at once. #114: a boss wave clears this way too, without the
+        // earlier hand-over, so the next wave starts in this step rather than sitting in a zero-length breather.
+        beginWave(game, w.number + 1);
+      }
     }
   }
   pruneSchools(game);

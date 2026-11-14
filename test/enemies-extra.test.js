@@ -541,6 +541,17 @@ test('a dash outside the exposure does nothing to the Warden', () => {
   assert.equal(w.alive, true);
 });
 
+test('the Warden\'s body does not hurt Rip on touch: its lure and the exposed hits are the threat (bot balance, #114)', () => {
+  const g = quiet();
+  place(g, 600, H / 2);
+  const w = spawnEnemy(g, 'warden', 600, H / 2, 10);
+  w.grace = 0;
+  w.state = 'recover';
+  w.stateT = 5;
+  run(g, seconds(0.3));
+  assert.equal(g.player.hp, PLAYER.maxHp, 'standing inside its body costs nothing');
+});
+
 test('the Warden telegraphs, snaps, exposes for 0.6 s, then recovers: the weak point is only open after the attack', () => {
   const g = quiet();
   const w = spawnEnemy(g, 'warden', 900, H / 2, 10);
@@ -640,6 +651,7 @@ test('a boss wave holds until its Warden dies: the next wave does not start whil
     assert.equal(g.wave.number, 10, 'still wave 10 while the boss lives');
   }
   killEnemy(g, boss, 1, 'dash');
+  assert.equal(g.wave.boss, null, 'the hold ends with the boss');
   let cleared = false;
   let started = false;
   for (let i = 0; i < seconds(15) && !started; i++) {

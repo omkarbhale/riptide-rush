@@ -450,6 +450,7 @@ export const EXTRA_KINDS = {
   warden: {
     radius: WD.radius,
     points: WD.points,
+    contact: false, // its body does not hurt on touch: the lure and the exposed hits are the threat (bot balance, #114)
     dieOnContact: false,
     staggerable: false, // an ordinary Pulse does nothing to it; see pulseExtras for the perfect-Pulse stun
     dashOnly: true,
@@ -537,6 +538,8 @@ export const EXTRA_KINDS = {
           faded += 1;
         }
       }
+      // The boss wave's hold on hand-over ends with its boss: the rest of the wave then clears or hands over as usual.
+      if (game.wave.number === e.wave) game.wave.boss = null;
       game.events.push({ type: 'bossDown', x: e.x, y: e.y, enemyType: 'warden', phase: e.phase, lures: faded });
       opsOf(game).healPlayer(game, e.x, e.y, 'warden');
     },
