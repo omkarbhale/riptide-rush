@@ -6,6 +6,7 @@ import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, PULSE, SPAWN, ENEMY, PLAYER, D
 import { dashPreview } from './game.js';
 import { draw, PALETTE } from './art.js';
 import { drawPickups } from './pickups-art.js'; // PICKUPS (#54)
+import { drawModesLayer } from './modes-ui.js'; // mode picker, mode label, daily share prompt (#124)
 import {
   DEFAULT_SETTINGS,
   computeLayout,
@@ -709,5 +710,6 @@ export function drawFrame(ctx, view) {
   // HUD, title, pause and game-over screens, in window pixels, scaled by L.hs and not by the arena.
   ctx.setTransform(dev, 0, 0, dev, 0, 0);
   drawHudLayer(ctx, L, { ...view, hud, settings, muted: settings.muted, menuRow: view.menuRow ?? 0 });
+  drawModesLayer(ctx, L, view);
   lap('hud');
 }
