@@ -18,7 +18,9 @@ const PICK = Object.freeze({ y: 70, w: 196, h: 46, gap: 14, hintY: 136, detailY:
 const PICK_TOTAL = 4 * PICK.w + 3 * PICK.gap; // the widest the row gets, in logical units
 
 // Game-over card, in offsets from the window centre (CSS px scaled by L.hs, like hud.js gameOverEntries).
-const OVER = Object.freeze({ tag: -256, note: 190, share: 226, shareW: 220, shareH: 44 });
+// The tag sits above the WRECKED title (logical y 30), the share button in the band between the summary panels
+// (which end at logical y 566) and the "dive again" prompt (logical y 622).
+const OVER = Object.freeze({ tag: -330, note: 190, share: 230, shareW: 220, shareH: 40 });
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -185,7 +187,7 @@ function drawGameOverCard(ctx, L, view) {
     ctx.restore();
     text(ctx, shareLabel(modes, view.time), cx, r.y + r.h / 2, `bold ${18 * k}px ${FONT}`, PALETTE.gold);
     if (fallback) {
-      text(ctx, 'Clipboard blocked: select the text below and copy it', cx, r.y + r.h + 22 * k, `${13 * k}px ${FONT}`, TEXT);
+      text(ctx, 'Clipboard blocked: select the text below and copy it', cx, cy + 286 * k, `${13 * k}px ${FONT}`, TEXT);
     }
   } else {
     const record = modes.daily?.official;
@@ -202,7 +204,7 @@ let field = null;
 function fieldRect(L) {
   const r = shareRect(L);
   const w = clamp(560 * L.hs, 200, Math.max(200, L.winW - 24));
-  return { x: L.winW / 2 - w / 2, y: r.y + r.h + 40 * L.hs, w };
+  return { x: L.winW / 2 - w / 2, y: r.y + r.h + 58 * L.hs, w };
 }
 
 export function showShareField(text, L) {
