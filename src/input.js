@@ -3,6 +3,7 @@
 // Importing this module touches no DOM; only createInput() attaches listeners.
 import { LOGICAL_WIDTH, LOGICAL_HEIGHT, INPUT_BUFFER } from './config.js';
 import { createTouchState, isTouchDevice, mountTouchControls, unitVector } from './touch.js';
+import { CURSOR_DEAD_ZONE, aimPresence } from './player-vis.js';
 
 const MOVE_KEYS = {
   KeyW: [0, -1],
@@ -84,6 +85,16 @@ export function radialDeadZone(x, y, deadZone) {
 // The aim point `range` px from `origin` along the unit direction `dir`.
 export function aimPoint(origin, dir, range = AIM_RANGE) {
   return { x: origin.x + dir.x * range, y: origin.y + dir.y * range };
+}
+
+// Mouse aim by direction. `dx, dy` is the cursor's offset from the player and `prev` the last stable direction
+// (a unit vector). Within `deadZone` px the offset's direction is mostly jitter, so `prev` is kept and `held` is
+// true. Outside it the cursor's own unit direction is used. Pure: the dash itself reads its own action buffer,
+// so this never delays or blocks it.
+export function stableAimDirection(prev, dx, dy, deadZone = CURSOR_DEAD_ZONE) {
+  const m = Math.hypot(dx, dy);
+  if (!(m > deadZone)) return { x: prev.x, y: prev.y, held: true };
+  return { x: dx / m, y: dy / m, held: false };
 }
 
 // The four menu directions a stick vector is past. A stick pushed up pins 'up' as long as it is held there.
@@ -171,14 +182,17 @@ export function createActionBuffer(windowSeconds = INPUT_BUFFER) {
 // options.mapPoint(clientX, clientY) -> { x, y } in logical arena space. Defaults to the canvas rectangle,
 // which is right only when the canvas is the arena; main.js passes the letterbox mapping.
 // options.claimPointer(button, clientX, clientY) -> true when a menu took the click, so no action is queued.
-// options.playerPosition() -> { x, y } of the player in logical space. Touch and gamepad aim are a direction
-// from the player, so without it they aim from the centre of the arena.
+// options.playerPosition() -> { x, y } of the player in logical space. Touch, gamepad and mouse aim are all
+// directions from the player. Without the option, render.js's last-frame player position is used (aimPresence),
+// so the aim never falls back to the arena centre. Before the first frame it is the centre.
 // options.touch: true to mount the touch overlay. Defaults to on for touch-first devices only.
 export function createInput(canvas, options = {}) {
   const held = new Set();
   const edges = [];
   const buffer = createActionBuffer();
   const aim = { x: LOGICAL_WIDTH / 2, y: LOGICAL_HEIGHT / 2 }; // mouse aim, absolute logical point
+  aimPresence.cursor = aim; // render.js draws the crosshair at the real cursor
+  let stableDir = { x: 1, y: 0 }; // mouse: the last stable aim direction (see stableAimDirection)
   const mapPoint =
     options.mapPoint ??
     ((clientX, clientY) => {
@@ -189,7 +203,9 @@ export function createInput(canvas, options = {}) {
       };
     });
   const claimPointer = options.claimPointer ?? (() => false);
-  const playerPosition = options.playerPosition ?? null;
+  const playerPosition = options.playerPosition ?? (() => aimPresence.player);
+  const centre = () => ({ x: LOGICAL_WIDTH / 2, y: LOGICAL_HEIGHT / 2 });
+  const origin = () => playerPosition() ?? centre();
 
   // Relative aim (touch and gamepad): a unit direction from the player. aimSource says which aim the
   // snapshot uses. 'mouse' is the absolute desktop aim and the default; touch-first devices start 'relative'.
@@ -224,10 +240,12 @@ export function createInput(canvas, options = {}) {
   const onMouseMove = (e) => {
     Object.assign(aim, mapPoint(e.clientX, e.clientY));
     aimSource = 'mouse';
+    if (!useTouch) aimPresence.mouseSeen = true;
   };
   const onMouseDown = (e) => {
     Object.assign(aim, mapPoint(e.clientX, e.clientY));
     aimSource = 'mouse';
+    if (!useTouch) aimPresence.mouseSeen = true;
     if (claimPointer(e.button, e.clientX, e.clientY)) return;
     const actions = MOUSE_ACTIONS[e.button];
     if (!actions) return;
@@ -306,14 +324,22 @@ export function createInput(canvas, options = {}) {
       let aimX = aim.x;
       let aimY = aim.y;
       if (aimSource === 'relative') {
-        const origin = (playerPosition && playerPosition()) || {
-          x: LOGICAL_WIDTH / 2,
-          y: LOGICAL_HEIGHT / 2,
-        };
-        const p = aimPoint(origin, relDir);
+        const p = aimPoint(origin(), relDir);
         aimX = p.x;
         aimY = p.y;
+      } else {
+        // Mouse: outside the dead zone the absolute cursor point is sent, as before. Inside it the last stable
+        // direction is sent from the player, so jitter near the player does not swing the aim.
+        const o = origin();
+        const s = stableAimDirection(stableDir, aim.x - o.x, aim.y - o.y);
+        stableDir = { x: s.x, y: s.y };
+        if (s.held) {
+          const p = aimPoint(o, stableDir);
+          aimX = p.x;
+          aimY = p.y;
+        }
       }
+      aimPresence.source = aimSource;
       return {
         moveX: mx,
         moveY: my,

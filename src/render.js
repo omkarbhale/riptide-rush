@@ -15,6 +15,19 @@ import {
   hudRectsLogical,
   clampOutOfRects,
 } from './hud.js';
+import {
+  AIM_RAY,
+  HALO,
+  aimLineEnd,
+  aimLook,
+  aimPresence,
+  angleTo,
+  crosshairAlpha,
+  haloLook,
+  locatorLook,
+  ribbonAlpha,
+  smoothAngle,
+} from './player-vis.js';
 
 const FONT = '"Trebuchet MS", "Segoe UI", system-ui, sans-serif';
 const TAU = Math.PI * 2;
@@ -240,41 +253,244 @@ function drawBullets(ctx, game, view) {
   }
 }
 
-// Afterglow after a dash, and an aim preview: a faint line and ring where the next dash would end,
-// brighter (gold) when it would kill. Reads state only.
-function drawDashFeedback(ctx, game) {
+// ---- player visibility (issue #131) -----------------------------------------------------------------
+// Presentation state that lives across frames: the last hit and dash timings (real time), the dash ribbon,
+// the locator ring, and the displayed aim angle. It is reset whenever a new game object arrives.
+let vis = null;
+function newVis(game) {
+  return {
+    game,
+    prevHp: game.player.hp,
+    hurtAt: -Infinity,
+    ribbon: null, // { dash, sx, sy, hx, hy, endT } for the dash in progress or the last one
+    locatorAt: -Infinity,
+    locatorX: 0,
+    locatorY: 0,
+    aimAngle: null,
+  };
+}
+
+// Reads the sim once per frame into vis, and publishes the player position for input's aim origin.
+function stepVis(game, view, pos) {
+  if (!vis || vis.game !== game) vis = newVis(game);
   const p = game.player;
-  if (p.dashGrace > 0 && !p.dash.active) {
-    // Afterglow: a white-hot halo that fades and widens over the grace, so the safe window reads on screen.
-    const k = p.dashGrace / DASH.killGrace; // 1 at the dash end (or the kill), 0 when the grace is over
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.6 * k;
-    ctx.strokeStyle = PALETTE.dash;
-    ctx.shadowColor = PALETTE.dash;
-    ctx.shadowBlur = 24;
-    ctx.lineWidth = 3 + 4 * (1 - k);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, PLAYER.radius * (1.6 + 1.0 * (1 - k)), 0, TAU);
-    ctx.stroke();
-    ctx.restore();
+  if (p.hp < vis.prevHp) vis.hurtAt = view.time;
+  vis.prevHp = p.hp;
+  const dash = p.dash.active;
+  if (dash) {
+    if (!vis.ribbon || vis.ribbon.dash !== dash) {
+      vis.ribbon = { dash, sx: dash.sx, sy: dash.sy, hx: pos.x, hy: pos.y, endT: null };
+    }
+    vis.ribbon.hx = pos.x;
+    vis.ribbon.hy = pos.y;
+  } else if (vis.ribbon && vis.ribbon.endT === null) {
+    // The dash has just ended (it ran out, or a Shellback bounced it): the ring snaps onto where Rip stopped.
+    vis.ribbon.endT = view.time;
+    vis.locatorAt = view.time;
+    vis.locatorX = p.x;
+    vis.locatorY = p.y;
   }
-  if (p.dash.active || p.dash.charges < 1 || game.over) return;
-  const pv = dashPreview(game, p.aimX, p.aimY);
+  aimPresence.player = { x: p.x, y: p.y };
+}
+
+// The dash ribbon: one continuous line from where the dash started to where Rip is (or where it stopped),
+// brighter at the head, so the eye can follow the whole path. It fades out after the dash.
+function drawRibbon(ctx, view) {
+  const r = vis.ribbon;
+  if (!r) return;
+  const endAge = r.endT === null ? 0 : view.time - r.endT;
+  const a = ribbonAlpha(endAge);
+  if (a <= 0) return;
+  const g = ctx.createLinearGradient(r.sx, r.sy, r.hx, r.hy);
+  g.addColorStop(0, 'rgba(60, 242, 255, 0)');
+  g.addColorStop(1, PALETTE.dash);
   ctx.save();
-  ctx.strokeStyle = pv.kills ? PALETTE.gold : PALETTE.dash;
-  ctx.globalAlpha = pv.kills ? 0.9 : 0.3;
-  ctx.lineWidth = pv.kills ? 3 : 2;
-  ctx.setLineDash([6, 8]);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = g;
+  ctx.globalAlpha = 0.55 * a;
+  ctx.lineWidth = 8;
   ctx.beginPath();
-  ctx.moveTo(p.x, p.y);
-  ctx.lineTo(pv.x, pv.y);
+  ctx.moveTo(r.sx, r.sy);
+  ctx.lineTo(r.hx, r.hy);
   ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.beginPath();
-  ctx.arc(pv.x, pv.y, PLAYER.radius + 6, 0, TAU);
+  ctx.globalAlpha = a;
+  ctx.lineWidth = 2.2;
   ctx.stroke();
   ctx.restore();
+}
+
+// Afterglow after a dash: a white-hot halo that fades and widens over the grace, so the safe window reads on screen.
+function drawAfterglow(ctx, game) {
+  const p = game.player;
+  if (!(p.dashGrace > 0 && !p.dash.active)) return;
+  const k = p.dashGrace / DASH.killGrace; // 1 at the dash end (or the kill), 0 when the grace is over
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.6 * k;
+  ctx.strokeStyle = PALETTE.dash;
+  ctx.shadowColor = PALETTE.dash;
+  ctx.shadowBlur = 24;
+  ctx.lineWidth = 3 + 4 * (1 - k);
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, PLAYER.radius * (1.6 + 1.0 * (1 - k)), 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+const RGB_DASH = '234, 255, 255';
+const RGB_GOLD = '255, 224, 102';
+
+// The aim: one tapered ray from the player to where the next dash would end (lunge assist included), with a
+// reticle at the end. Gold and bright when the dash would kill. The angle eases toward the true dash angle
+// for display only; the dash itself always uses the real direction. Hidden while dashing (the ribbon shows it).
+function drawAimRay(ctx, game, origin, view) {
+  const p = game.player;
+  if (p.dash.active || game.over) return;
+  const pv = dashPreview(game, p.aimX, p.aimY);
+  const target = angleTo(origin, pv);
+  vis.aimAngle = vis.aimAngle === null ? target : smoothAngle(vis.aimAngle, target, view.dt);
+  const a = vis.aimAngle;
+  const end = aimLineEnd(origin, pv, a);
+  const look = aimLook({ kills: pv.kills, charges: p.dash.charges });
+  const rgb = look.gold ? RGB_GOLD : RGB_DASH;
+  const nx = -Math.sin(a);
+  const ny = Math.cos(a);
+  const g = ctx.createLinearGradient(origin.x, origin.y, end.x, end.y);
+  g.addColorStop(0, `rgba(${rgb}, 0.1)`);
+  g.addColorStop(1, `rgba(${rgb}, 1)`);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = look.alpha;
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(origin.x + nx * AIM_RAY.startHalf, origin.y + ny * AIM_RAY.startHalf);
+  ctx.lineTo(end.x + nx * AIM_RAY.endHalf, end.y + ny * AIM_RAY.endHalf);
+  ctx.lineTo(end.x - nx * AIM_RAY.endHalf, end.y - ny * AIM_RAY.endHalf);
+  ctx.lineTo(origin.x - nx * AIM_RAY.startHalf, origin.y - ny * AIM_RAY.startHalf);
+  ctx.closePath();
+  ctx.fill();
+  // The reticle: a ring at the end, with a dot. Gold rings glow when the dash would kill.
+  ctx.strokeStyle = look.gold ? PALETTE.gold : PALETTE.dash;
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.lineWidth = look.gold ? 2.4 : 1.6;
+  if (look.gold) {
+    ctx.shadowColor = PALETTE.gold;
+    ctx.shadowBlur = 10;
+  }
+  ctx.beginPath();
+  ctx.arc(end.x, end.y, AIM_RAY.reticle, 0, TAU);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(end.x, end.y, 1.4, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
+// The spotlight: a soft dark disc under the player. It lowers the brightness of whatever is behind the
+// player, so effects and floaters close to Rip read dimmer and the halo stands out. Drawn under the player.
+function drawSpotlight(ctx, x, y) {
+  const r = HALO.spotRadius;
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, `rgba(2, 4, 12, ${HALO.spotAlpha})`);
+  g.addColorStop(0.5, `rgba(2, 4, 12, ${HALO.spotAlpha * 0.6})`);
+  g.addColorStop(1, 'rgba(2, 4, 12, 0)');
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
+// The halo: a crisp bright cyan ring with a thin dark rim outside it. Nothing else in the arena uses this
+// signature, so the player is always the ring. Drawn above enemies, particles and floaters.
+function drawHalo(ctx, x, y, look) {
+  ctx.save();
+  // A soft wide glow behind the ring, a little stronger when boosted.
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.18 + 0.2 * look.glow;
+  ctx.strokeStyle = PALETTE.player;
+  ctx.lineWidth = 6 + 3 * look.glow;
+  ctx.beginPath();
+  ctx.arc(x, y, look.radius, 0, TAU);
+  ctx.stroke();
+  // The bright ring: brighter, whiter and a touch thicker when boosted.
+  ctx.globalAlpha = 0.85 + 0.15 * look.glow;
+  ctx.strokeStyle = look.glow ? PALETTE.dash : PALETTE.player;
+  ctx.lineWidth = HALO.width + 0.6 * look.glow;
+  ctx.beginPath();
+  ctx.arc(x, y, look.radius, 0, TAU);
+  ctx.stroke();
+  // The thin dark rim, outside the ring.
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 0.8;
+  ctx.strokeStyle = 'rgb(2, 4, 12)';
+  ctx.lineWidth = HALO.rimWidth;
+  ctx.beginPath();
+  ctx.arc(x, y, look.radius + HALO.rimOffset, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The locator ring after a dash: it contracts onto the point where the dash stopped, so the new position
+// snaps into view instead of teleporting unseen.
+function drawLocator(ctx, view) {
+  const k = locatorLook(view.time - vis.locatorAt);
+  if (!k) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = k.alpha;
+  ctx.strokeStyle = PALETTE.dash;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(vis.locatorX, vis.locatorY, k.radius, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The crosshair for mouse aim: a small white cross with a dark outline, at the real cursor. It fades out as
+// the cursor nears the player, so it never sits on top of Rip. Drawn outside the screen shake, so it stays
+// under the cursor.
+function drawCrosshair(ctx, origin, cursor) {
+  const a = crosshairAlpha(Math.hypot(cursor.x - origin.x, cursor.y - origin.y));
+  if (a <= 0.01) return;
+  const s = 8; // arm length
+  const gap = 3.5; // empty centre
+  const cx = cursor.x;
+  const cy = cursor.y;
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.lineCap = 'butt';
+  for (const [w, col] of [
+    [3.2, 'rgb(2, 4, 12)'],
+    [1.4, '#f4f8ff'],
+  ]) {
+    ctx.lineWidth = w;
+    ctx.strokeStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(cx - s, cy);
+    ctx.lineTo(cx - gap, cy);
+    ctx.moveTo(cx + gap, cy);
+    ctx.lineTo(cx + s, cy);
+    ctx.moveTo(cx, cy - s);
+    ctx.lineTo(cx, cy - gap);
+    ctx.moveTo(cx, cy + gap);
+    ctx.lineTo(cx, cy + s);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// The cursor is hidden over the canvas only while playing with the mouse aiming, so menus keep it.
+// Written only when it changes.
+function syncCursor(ctx, screen, game) {
+  const style = ctx.canvas?.style;
+  if (!style) return;
+  const hide = screen === 'playing' && !!game && !game.over && aimPresence.source === 'mouse' && aimPresence.mouseSeen;
+  const want = hide ? 'none' : '';
+  if (style.cursor !== want) style.cursor = want;
 }
 
 // Stretch along the dash: a damped spring toward STRETCH_DASH while dashing and back to 1 afterwards,
@@ -293,10 +509,9 @@ function stepStretch(target, dt) {
   return stretch;
 }
 
-function drawPlayer(ctx, game, view) {
+function drawPlayer(ctx, game, view, pos) {
   const p = game.player;
-  const x = lerp(p.px, p.x, view.alpha);
-  const y = lerp(p.py, p.y, view.alpha);
+  const { x, y } = pos;
   const dashing = !!p.dash.active;
   // Squash and stretch: stretched along the facing (the dash direction), area kept by the cross axis.
   const s = stepStretch(dashing ? STRETCH_DASH : 1, view.dt);
@@ -445,6 +660,12 @@ export function drawFrame(ctx, view) {
     // arena backdrop. The Screen shake option scales both: 100%, 50% or 0%.
     const shake = fx.getShakeOffset();
     const kick = fx.getKickOffset?.() ?? NO_KICK;
+    const p = game.player;
+    const pos = { x: lerp(p.px, p.x, view.alpha), y: lerp(p.py, p.y, view.alpha) };
+    stepVis(game, view, pos);
+    let enemies = 0;
+    for (const e of game.enemies) if (e.alive !== false) enemies++;
+    const halo = haloLook({ hurtAge: view.time - vis.hurtAt, enemies, reducedFlashes: settings.reducedFlashes });
     ctx.save();
     ctx.translate((shake.x + kick.x) * settings.shake, (shake.y + kick.y) * settings.shake);
     const avoid = hudRectsLogical(L, Object.keys(game.modifiers).length);
@@ -459,18 +680,31 @@ export function drawFrame(ctx, view) {
     lap('enemies');
     drawBullets(ctx, game, view);
     lap('bullets');
-    drawDashFeedback(ctx, game);
+    drawAfterglow(ctx, game);
+    drawRibbon(ctx, view);
     lap('dashFeedback');
-    drawPlayer(ctx, game, view);
-    lap('player');
     drawRings(ctx, view.rings);
     lap('rings');
     fx.drawWorld(ctx);
     lap('fxWorld');
+    // Above the particles and floaters: the spotlight dims what is behind Rip, then the aim, the halo and Rip.
+    drawSpotlight(ctx, pos.x, pos.y);
+    drawAimRay(ctx, game, pos, view);
+    drawHalo(ctx, pos.x, pos.y, halo);
+    drawPlayer(ctx, game, view, pos);
+    drawLocator(ctx, view);
+    lap('player');
     ctx.restore();
     // Reduced flashes: no full-screen flash or vignette pulse.
     if (!settings.reducedFlashes) fx.drawScreen(ctx, W, H);
     lap('fxScreen');
+    // The crosshair is drawn after the shake is undone, so it sits under the real cursor.
+    if (screen === 'playing' && !game.over && aimPresence.source === 'mouse' && aimPresence.mouseSeen) {
+      drawCrosshair(ctx, pos, aimPresence.cursor);
+    }
+    syncCursor(ctx, screen, game);
+  } else {
+    syncCursor(ctx, screen, null);
   }
 
   // HUD, title, pause and game-over screens, in window pixels, scaled by L.hs and not by the arena.

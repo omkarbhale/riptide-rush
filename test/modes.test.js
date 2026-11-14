@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { HIGH_SCORE_KEY, SIM_DT, SIM_HZ, LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H } from '../src/config.js';
 import { createGame, update, drainEvents, spawnEnemy, speedScaleFor, damagePlayer } from '../src/game.js';
 import { dashMaxCharges, onKill } from '../src/pickups.js';
+import { SCORES_KEY } from '../src/scores.js';
 import {
   CHALLENGE_KEY,
   DAILY_KEEP,
@@ -20,7 +21,7 @@ import {
   formatScore,
   loadMode,
   medalFor,
-  recordRun,
+  recordModeRun,
   rulesFor,
   saveMode,
   seedFor,
@@ -308,47 +309,52 @@ test('the existing single best is Classic best, read from the same key', () => {
 test('a challenge best is stored under its own key and never touches Classic', () => {
   const s = memoryStorage();
   s.setItem(HIGH_SCORE_KEY, '12400');
-  const r = recordRun(s, 'one-life', '2026-11-14', { score: 3100, wave: 7, combo: 20 });
+  const r = recordModeRun(s, 'one-life', '2026-11-14', { score: 3100, wave: 7, combo: 20 });
   assert.equal(r.newBest, true);
   assert.equal(bestScore(s, 'one-life', '2026-11-14'), 3100);
   assert.equal(bestScore(s, 'classic', '2026-11-14'), 12400, 'Classic best unchanged');
   assert.ok(s.raw.get(CHALLENGE_KEY).includes('"one-life"'));
-  const low = recordRun(s, 'one-life', '2026-11-14', { score: 100, wave: 1, combo: 0 });
+  const low = recordModeRun(s, 'one-life', '2026-11-14', { score: 100, wave: 1, combo: 0 });
   assert.equal(low.newBest, false);
   assert.equal(bestScore(s, 'one-life', '2026-11-14'), 3100, 'a lower run does not overwrite the best');
-  const np = recordRun(s, 'no-pulse', '2026-11-14', { score: 2480, wave: 6, combo: 9 });
+  const np = recordModeRun(s, 'no-pulse', '2026-11-14', { score: 2480, wave: 6, combo: 9 });
   assert.equal(np.newBest, true);
   assert.equal(bestScore(s, 'one-life', '2026-11-14'), 3100, 'no-pulse does not overwrite one-life');
 });
 
-test('a Classic run updates the Classic best only when it beats it', () => {
+test('Classic best is the top of the existing top-five list, not a second key', () => {
   const s = memoryStorage();
-  assert.equal(recordRun(s, 'classic', '2026-11-14', { score: 500, wave: 2, combo: 3 }).newBest, true);
-  assert.equal(recordRun(s, 'classic', '2026-11-14', { score: 300, wave: 2, combo: 3 }).newBest, false);
+  s.setItem(SCORES_KEY, JSON.stringify([{ score: 500 }, { score: 300 }]));
   assert.equal(bestScore(s, 'classic', '2026-11-14'), 500);
-  assert.equal(s.getItem(HIGH_SCORE_KEY), '500');
+  // Classic runs go onto that list in main.js (scores.js), so this module leaves Classic and its key alone.
+  assert.deepEqual(recordModeRun(s, 'classic', '2026-11-14', { score: 900, wave: 3, combo: 4 }), {
+    newBest: false,
+    official: false,
+    best: 500,
+  });
+  assert.equal(s.getItem(HIGH_SCORE_KEY), null, 'the old single key is not written');
 });
 
 test('Daily Tide records one official attempt per UTC day; later attempts are practice', () => {
   const s = memoryStorage();
   const day = '2026-11-14';
-  const first = recordRun(s, 'daily', day, { score: 4812, wave: 9, combo: 23 });
+  const first = recordModeRun(s, 'daily', day, { score: 4812, wave: 9, combo: 23 });
   assert.equal(first.official, true);
-  const second = recordRun(s, 'daily', day, { score: 9000, wave: 12, combo: 40 });
+  const second = recordModeRun(s, 'daily', day, { score: 9000, wave: 12, combo: 40 });
   assert.equal(second.official, false, 'a later attempt is practice');
   const entry = dailyEntry(s, day);
   assert.deepEqual(entry.official, { score: 4812, wave: 9, combo: 23 }, 'the official result is the first attempt');
   assert.equal(entry.plays, 2);
   assert.equal(bestScore(s, 'daily', day), 4812, 'the day best is the official score');
   // The next UTC day starts a fresh official attempt.
-  assert.equal(recordRun(s, 'daily', '2026-11-15', { score: 10, wave: 1, combo: 0 }).official, true);
+  assert.equal(recordModeRun(s, 'daily', '2026-11-15', { score: 10, wave: 1, combo: 0 }).official, true);
 });
 
 test('the daily record keeps the last 30 dates and drops older ones', () => {
   const s = memoryStorage();
   for (let i = 0; i < DAILY_KEEP + 5; i++) {
     const day = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10);
-    recordRun(s, 'daily', day, { score: 100, wave: 1, combo: 0 });
+    recordModeRun(s, 'daily', day, { score: 100, wave: 1, combo: 0 });
   }
   const kept = Object.keys(JSON.parse(s.getItem(DAILY_KEY)));
   assert.equal(kept.length, DAILY_KEEP);
@@ -374,9 +380,9 @@ test('blocked or missing localStorage gives the defaults and never throws', () =
     assert.equal(bestScore(s, 'classic', '2026-11-14'), 0);
     assert.equal(bestScore(s, 'one-life', '2026-11-14'), 0);
     assert.equal(bestScore(s, 'daily', '2026-11-14'), 0);
-    const r = recordRun(s, 'daily', '2026-11-14', { score: 50, wave: 1, combo: 1 });
+    const r = recordModeRun(s, 'daily', '2026-11-14', { score: 50, wave: 1, combo: 1 });
     assert.equal(r.official, true, 'the run still counts for this page');
-    recordRun(s, 'classic', '2026-11-14', { score: 50, wave: 1, combo: 1 });
-    recordRun(s, 'one-life', '2026-11-14', { score: 50, wave: 1, combo: 1 });
+    recordModeRun(s, 'classic', '2026-11-14', { score: 50, wave: 1, combo: 1 });
+    recordModeRun(s, 'one-life', '2026-11-14', { score: 50, wave: 1, combo: 1 });
   }
 });

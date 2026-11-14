@@ -1,7 +1,7 @@
 // Boot, fixed-timestep loop, screen state machine, and the wiring between the sim, the effects layer,
 // the sound layer and the renderer. Sim events go to feedback.js and hud.js; this file only handles state
 // changes, input routing and the saved options.
-import { SIM_DT, MAX_FRAME_DT, RESTART_GATE, LOGICAL_WIDTH, LOGICAL_HEIGHT } from './config.js';
+import { SIM_DT, MAX_FRAME_DT, LOGICAL_WIDTH, LOGICAL_HEIGHT } from './config.js';
 import { createGame, update, drainEvents } from './game.js';
 import { createInput } from './input.js';
 import { drawFrame, currentZoom } from './render.js';
@@ -16,7 +16,7 @@ import {
   dailyShareText,
   isModeId,
   loadMode,
-  recordRun,
+  recordModeRun,
   rulesFor,
   saveMode,
   seedFor,
@@ -24,19 +24,26 @@ import {
 } from './modes.js';
 import { copyText, hideShareField, modesHit, showShareField } from './modes-ui.js';
 import {
+  HOWTO_CARDS,
   OPTION_ROWS,
+  SUMMARY_GATE,
   activateSetting,
   computeLayout,
   createHud,
   hudEvents,
   hudUpdate,
+  howtoHit,
+  loadHowtoSeen,
   loadSettings,
   pauseHit,
+  runRecord,
+  saveHowtoSeen,
   saveSettings,
   setVolume,
   stepSetting,
   trackFraction,
 } from './hud.js';
+import { loadScores, recordRun, saveScores } from './scores.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -50,9 +57,10 @@ function storage() {
   }
 }
 
-// screen: 'title' | 'playing' | 'paused' | 'over'
+// screen: 'title' | 'howto' | 'playing' | 'paused' | 'over'
 // mode: the mode picked on the title screen (remembered). It only changes on the title screen, so it is also
-// the mode of the run in progress. bests: each mode's best (Daily Tide: today's official score).
+// the mode of the run in progress. bests: each mode's best (Classic: top of the top-five list; Daily Tide:
+// today's official score).
 const app = {
   screen: 'title',
   game: createGame(newSeed()),
@@ -66,8 +74,13 @@ const app = {
   share: null, // { state: 'pending' | 'copied' | 'fallback', at } for the share prompt
   tapClaimUntil: 0, // performance.now() until which the tap that just hit a button does not also act (see tapClaimed)
   lastRun: { score: 0, wave: 0, combo: 0 },
+  scores: loadScores(storage()), // the top five runs (scores.js), Classic's table
   newBest: false,
+  runRank: -1, // where the last run landed on the top five, -1 when it did not make it
   overAge: 0,
+  howtoSeen: loadHowtoSeen(storage()),
+  howtoIndex: 0,
+  howtoFrom: 'title', // the screen the how-to was opened from: 'title' (first run) or 'paused'
   settings: loadSettings(storage()),
   menuRow: 0, // the option under the keyboard cursor on the pause screen
   layout: computeLayout(window.innerWidth, window.innerHeight),
@@ -229,15 +242,28 @@ function claimPointer(button, clientX, clientY) {
     share();
     return true;
   }
+  // The how-to's Skip button is the only click it claims; other clicks advance a card as usual.
+  if (app.screen === 'howto') {
+    if (howtoHit(app.layout, p.x, p.y) !== 'skip') return false;
+    closeHowto();
+    return true;
+  }
   if (app.screen !== 'paused') return false;
   const hit = pauseHit(app.layout, p.x, p.y);
   if (!hit) return false;
   if (hit.row !== null) {
     app.menuRow = hit.row;
     if (hit.part === 'track') changeSettings(setVolume(app.settings, trackFraction(app.layout, p.x)));
-    else changeSettings(activateSetting(app.settings, OPTION_ROWS[hit.row]));
+    else activateMenuRow(hit.row);
   }
   return true;
+}
+
+// Enter or a click on a pause-menu row: the how-to row opens the cards, the rest change a setting.
+function activateMenuRow(i) {
+  const row = OPTION_ROWS[i];
+  if (row === 'howto') openHowto('paused');
+  else changeSettings(activateSetting(app.settings, row));
 }
 
 // A run starts in the remembered mode. Daily Tide uses the day's seed and mutator; the others use a random seed
@@ -251,10 +277,31 @@ function startRun() {
   app.official = false;
   app.share = null;
   hideShareField();
+  app.runRank = -1;
   app.overAge = 0;
   app.acc = 0;
   input.reset();
   feedback.startRun();
+}
+
+// The how-to cards: from the title on the first run, or from the pause menu at any time.
+function openHowto(from) {
+  app.howtoFrom = from;
+  app.howtoIndex = 0;
+  app.screen = 'howto';
+  input.reset();
+}
+
+// Leaves the cards (finished or skipped). The first run goes straight into play; from the pause menu it
+// returns to the pause screen.
+function closeHowto() {
+  if (!app.howtoSeen) {
+    app.howtoSeen = true;
+    saveHowtoSeen(storage());
+  }
+  input.reset();
+  if (app.howtoFrom === 'title') startRun();
+  else app.screen = 'paused';
 }
 
 function pause() {
@@ -271,15 +318,30 @@ function resume() {
   feedback.setPaused(false);
 }
 
-// Records the run under its mode (per-mode best, or the day's official result for Daily Tide).
-function endRun(score, peakCombo) {
+// Records the run under its mode. Classic goes onto the top-five list, saved at once; the summary reads the rank
+// and the new best. The other modes keep their own best (Daily Tide: the day's official result).
+function endRun() {
   app.screen = 'over';
   app.overAge = 0;
-  const wave = app.game.wave.number;
-  const result = recordRun(storage(), app.mode, app.runDayKey, { score, wave, combo: peakCombo });
-  app.newBest = result.newBest && app.mode !== 'daily'; // Daily Tide shows its official result instead
-  app.official = result.official;
-  app.lastRun = { score, wave, combo: peakCombo };
+  const run = runRecord(app.game, app.hud, Date.now());
+  app.lastRun = { score: run.score, wave: run.wave ?? 0, combo: run.peakCombo ?? 0 };
+  app.runRank = -1;
+  if (app.mode === 'classic') {
+    const r = recordRun(app.scores, run);
+    app.scores = r.scores;
+    app.runRank = r.rank;
+    app.newBest = r.newBest;
+    app.official = false;
+    saveScores(storage(), r.scores);
+  } else {
+    const result = recordModeRun(storage(), app.mode, app.runDayKey, {
+      score: run.score,
+      wave: run.wave,
+      combo: run.peakCombo,
+    });
+    app.newBest = result.newBest && app.mode !== 'daily'; // Daily Tide shows its official result instead
+    app.official = result.official;
+  }
   refreshBests();
   input.reset();
 }
@@ -288,9 +350,19 @@ function handleAction(action) {
   switch (app.screen) {
     case 'title':
       if (tapClaimed(action)) break;
-      if (action === 'confirm' || action === 'select') startRun();
-      else if (action === 'left') cycleMode(-1);
+      if (action === 'confirm' || action === 'select') {
+        if (app.howtoSeen) startRun();
+        else openHowto('title');
+      } else if (action === 'left') cycleMode(-1);
       else if (action === 'right') cycleMode(1);
+      break;
+    case 'howto':
+      // Esc or P skips at once. Confirm, Enter or Right moves on; after the last card it closes.
+      if (action === 'pause') closeHowto();
+      else if (action === 'confirm' || action === 'select' || action === 'right') {
+        if (app.howtoIndex < HOWTO_CARDS.length - 1) app.howtoIndex += 1;
+        else closeHowto();
+      } else if (action === 'left') app.howtoIndex = Math.max(0, app.howtoIndex - 1);
       break;
     case 'playing':
       if (action === 'pause') pause();
@@ -303,11 +375,11 @@ function handleAction(action) {
       else if (action === 'down') app.menuRow = (app.menuRow + 1) % OPTION_ROWS.length;
       else if (action === 'left' || action === 'right') {
         changeSettings(stepSetting(app.settings, OPTION_ROWS[app.menuRow], action === 'left' ? -1 : 1));
-      } else if (action === 'select') changeSettings(activateSetting(app.settings, OPTION_ROWS[app.menuRow]));
+      } else if (action === 'select') activateMenuRow(app.menuRow);
       break;
     case 'over':
       if (tapClaimed(action)) break;
-      if ((action === 'confirm' || action === 'select') && app.overAge >= RESTART_GATE) startRun();
+      if ((action === 'confirm' || action === 'select') && app.overAge >= SUMMARY_GATE) startRun();
       break;
     default:
       break;
@@ -337,18 +409,18 @@ function simStep() {
   if (app.screen !== 'playing') return;
   update(app.game, input.snapshot(), SIM_DT);
   const events = drainEvents(app.game);
-  let finalScore = null;
+  let ended = false;
   for (const ev of events) {
     // A dash or pulse has fired: clear its buffered press so it cannot fire twice.
     if (ev.type === 'dash') input.consume('dash');
     else if (ev.type === 'pulse') input.consume('pulse');
-    else if (ev.type === 'gameOver') finalScore = ev.score;
+    else if (ev.type === 'gameOver') ended = true;
     else if (ev.type === 'kill') feelKill(ev);
   }
   hudEvents(app.hud, events, app.game);
+  // The run is recorded after this step's HUD tallies, so its last kills count toward the summary.
+  if (ended) endRun();
   feedback.handleStep(events, app.game);
-  // The run is recorded after the HUD has seen this step's events, so the peak combo includes them.
-  if (finalScore !== null) endRun(finalScore, app.hud.peakCombo);
 }
 
 // Adaptive quality. The average frame interval is taken over 2 s of real time: above 20 ms the effects step
@@ -425,6 +497,10 @@ function frame(now) {
     highScore: app.bests[app.mode] ?? 0,
     modes: modesView(),
     newBest: app.newBest,
+    runRank: app.runRank,
+    // The top-five table is Classic's. The other modes have no table yet, so their summary shows the blank rows.
+    scores: app.mode === 'classic' ? app.scores : [],
+    howtoIndex: app.howtoIndex,
     overAge: app.overAge,
     muted: app.settings.muted,
     fx,

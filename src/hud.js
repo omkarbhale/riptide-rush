@@ -2,10 +2,11 @@
 // this module draws every piece of text, panel and screen overlay the player reads on top of the arena.
 // Everything above the drawing functions is pure (plain numbers in, plain objects out), so it runs under
 // `node --test`. Nothing here touches window or document at import time.
-import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, ARENA, PLAYER, PICKUP, MODIFIER, DASH, PULSE, RESTART_GATE } from './config.js';
-import { multiplierFor, comboWindowFor } from './game.js';
-import { PALETTE } from './art.js';
+import { LOGICAL_WIDTH as W, LOGICAL_HEIGHT as H, ARENA, PLAYER, PICKUP, MODIFIER, DASH, PULSE } from './config.js';
+import { multiplierFor, comboWindowFor, tierFor } from './game.js';
+import { PALETTE, draw } from './art.js';
 import { dashMaxCharges, PICKUP_KINDS } from './pickups.js';
+import { TOP_N } from './scores.js';
 
 export const FONT = '"Trebuchet MS", "Segoe UI", system-ui, sans-serif';
 // HUD text is never smaller than this on screen (the smallest HUD font is 12 logical px).
@@ -14,12 +15,14 @@ export const MIN_HUD_CSS_PX = 12;
 export const HUD_BENEATH_ALPHA = 0.35;
 
 export const SHAKE_STEPS = Object.freeze([1, 0.5, 0]);
-export const OPTION_ROWS = Object.freeze(['volume', 'muted', 'shake', 'reducedFlashes']);
+// The last row is not an option: it opens the how-to cards (main.js handles it), so it is never saved.
+export const OPTION_ROWS = Object.freeze(['volume', 'muted', 'shake', 'reducedFlashes', 'howto']);
 export const OPTION_LABELS = Object.freeze({
   volume: 'Master volume',
   muted: 'Mute',
   shake: 'Screen shake',
   reducedFlashes: 'Reduced flashes',
+  howto: 'How to play',
 });
 export const SETTINGS_KEY = 'riptide-rush.settings';
 const LEGACY_MUTE_KEY = 'riptide-rush.muted'; // read once, so an earlier mute choice survives the move
@@ -30,7 +33,7 @@ const FAINT = 'rgba(234, 255, 255, 0.5)';
 const SOFT = 'rgba(234, 255, 255, 0.85)';
 const BACKING = 'rgba(2, 6, 16, 0.42)';
 const BACKING_EDGE = 'rgba(234, 255, 255, 0.08)';
-const PANEL_FILL = 'rgba(2, 6, 16, 0.72)';
+const PANEL_FILL = 'rgba(2, 6, 16, 0.9)';
 const TAU = Math.PI * 2;
 
 const SCORE_POP_S = 0.2;
@@ -44,7 +47,11 @@ const FADE_RATE = 10; // per second: how fast a HUD block moves toward its targe
 const HUD_BLOCKS = Object.freeze(['score', 'wave', 'hearts', 'dash', 'pulse']);
 
 // Options panel, in logical units: width, height, and its top edge (absolute logical y).
-const PANEL = Object.freeze({ w: 440, h: 306, top: 330 });
+const PANEL = Object.freeze({ w: 440, h: 360, top: 330 });
+
+// Input is ignored for this long after a death, so a mid-fight click cannot skip the summary (#110).
+export const SUMMARY_GATE = 0.3;
+export const HOWTO_SEEN_KEY = 'riptide-rush.howtoSeen';
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const clamp01 = (v) => clamp(v, 0, 1);
@@ -218,6 +225,23 @@ export function setVolume(s, fraction) {
   return { ...s, volume: roundStep(clamp01(Number(fraction) || 0)) };
 }
 
+// The first-run how-to shows once. Blocked storage means it shows again next visit, which is harmless.
+export function loadHowtoSeen(storage) {
+  try {
+    return storage ? storage.getItem(HOWTO_SEEN_KEY) === '1' : false;
+  } catch {
+    return false;
+  }
+}
+
+export function saveHowtoSeen(storage) {
+  try {
+    if (storage) storage.setItem(HOWTO_SEEN_KEY, '1');
+  } catch {
+    // Storage can be blocked; the cards then show again on the next visit.
+  }
+}
+
 // ---- pause options panel --------------------------------------------------------------------------
 // Geometry in CSS px, shared by the drawing and the mouse hit test so they cannot disagree.
 export function pauseGeometry(L) {
@@ -291,6 +315,10 @@ export function createHud() {
     lastHp: null,
     hpShakeT: 0,
     peakCombo: 0,
+    bestChain: 0, // most kills in one dash or pulse (the kill event's `multi`)
+    dashes: 0, // dashes started this run
+    killDashes: 0, // dashes that killed at least one enemy (the summary's accuracy)
+    dashKilled: false, // whether the current dash has killed yet
     banners: [], // { text, color, size, y, t, life }
     alpha: { score: 1, wave: 1, hearts: 1, dash: 1, pulse: 1 },
   };
@@ -304,6 +332,17 @@ function addBanner(hud, text, color, size, y, life) {
 export function hudEvents(hud, events, game) {
   hud.peakCombo = Math.max(hud.peakCombo, game.combo.count);
   for (const ev of events) {
+    if (ev.type === 'dash') {
+      hud.dashes += 1;
+      hud.dashKilled = false;
+    } else if (ev.type === 'kill') {
+      hud.bestChain = Math.max(hud.bestChain, ev.multi ?? 1);
+      // A dash that kills counts once, however many enemies it takes. Mines dashed through count too.
+      if ((ev.cause === 'dash' || ev.cause === 'defuse') && !hud.dashKilled) {
+        hud.dashKilled = true;
+        hud.killDashes += 1;
+      }
+    }
     if (ev.type === 'waveStart') {
       addBanner(hud, `WAVE ${ev.wave}`, PALETTE.player, 44, 150, WAVE_BANNER_S);
     } else if (ev.type === 'heal' && ev.source === 'flawless') {
@@ -362,40 +401,171 @@ export function hudUpdate(hud, dt, game, L) {
   }
 }
 
-// ---- game over ----------------------------------------------------------------------------------------
-// The game-over stack, in CSS px. Offsets are logical units from the window centre. These lines never overlap
-// each other. The arena's own GAME OVER floater (feedback.js) is drawn separately and rises through this
-// stack for part of its life; removing it is a feedback.js change (see #77).
+// ---- run summary (game over) -------------------------------------------------------------------------
+// Medals by score, highest first. The thresholds are provisional until the balance pass settles them (#110).
+export const MEDALS = Object.freeze([
+  { id: 'abyssal', label: 'ABYSSAL', min: 30000, color: PALETTE.combo[3] },
+  { id: 'gold', label: 'GOLD', min: 15000, color: PALETTE.gold },
+  { id: 'silver', label: 'SILVER', min: 5000, color: '#dfe9f2' },
+  { id: 'bronze', label: 'BRONZE', min: 1000, color: '#cd7f4b' },
+]);
+export function medalFor(score) {
+  return MEDALS.find((m) => score >= m.min) ?? null;
+}
+
+// The count-up runs from COUNT_START to COUNT_START + COUNT_LEN seconds after the death.
+const COUNT_START = 0.25;
+const COUNT_LEN = 1.1;
+export function countUp(target, age) {
+  const p = clamp01((age - COUNT_START) / COUNT_LEN);
+  return Math.round(target * (1 - (1 - p) ** 3));
+}
+
+// 1234567 -> "1,234,567"
+export function groupDigits(n) {
+  return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// m:ss for a number of seconds.
+export function formatTime(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// The finished run as the top-five list stores it (scores.js). `at` is a timestamp the caller supplies.
+export function runRecord(game, hud, at) {
+  return {
+    score: game.score,
+    wave: game.wave?.number,
+    kills: game.kills,
+    peakCombo: hud.peakCombo,
+    chain: hud.bestChain,
+    seconds: game.time,
+    at,
+  };
+}
+
+// The summary's stats in reading order. A stat the game does not expose is left out, never shown blank.
+export function runStats(game, hud) {
+  const out = [];
+  const add = (label, value) => {
+    if (value !== undefined && value !== null) out.push({ label, value });
+  };
+  add('WAVE REACHED', game.wave?.number);
+  add('PEAK COMBO', hud.peakCombo);
+  add('BEST MULTI', hud.bestChain > 0 ? `x${hud.bestChain}` : null);
+  add('KILLS', game.kills);
+  add('ACCURACY', hud.dashes > 0 ? `${Math.round((100 * hud.killDashes) / hud.dashes)}%` : null);
+  add('TIME', Number.isFinite(game.time) ? formatTime(game.time) : null);
+  return out;
+}
+
+// The summary's panels, in logical units (the 1280x720 arena), so the same layout fits 1920x1080, 1366x768 and 800x900.
+const SUMMARY = Object.freeze({
+  title: 96,
+  sub: 154,
+  panelTop: 186,
+  panelH: 380,
+  left: { x: 268, w: 344 },
+  right: { x: 632, w: 384 },
+  prompt: 622,
+});
+
+// The summary's panels in CSS px, for the backing and the overlap test.
+export function summaryPanels(L) {
+  const k = L.hs;
+  const X = (v) => L.winW / 2 + (v - W / 2) * k;
+  const Y = (v) => L.winH / 2 + (v - H / 2) * k;
+  const panel = (p) => ({ x: X(p.x), y: Y(SUMMARY.panelTop), w: p.w * k, h: SUMMARY.panelH * k });
+  return { left: panel(SUMMARY.left), right: panel(SUMMARY.right) };
+}
+
+// Every text line on the summary, in CSS px, each with its centre y (middle baseline), alignment and alpha.
+// `v`: { score, highScore, newBest, overAge, time, stats (runStats), scores (top-five list), runRank }.
+// These lines never overlap each other. The arena's own GAME OVER floater (feedback.js) is drawn separately and
+// rises through this stack for part of its life; removing it is a feedback.js change (see #77).
 export function gameOverEntries(L, v) {
   const k = L.hs;
-  const cx = L.winW / 2;
-  const cy = L.winH / 2;
-  const y = (off) => cy + off * k;
-  const out = [
-    { id: 'title', text: 'WRECKED', size: 88 * k, weight: 'bold', color: PALETTE.danger, x: cx, y: y(-190) },
-    { id: 'score', text: `Score  ${v.score}`, size: 44 * k, weight: 'bold', color: PALETTE.gold, x: cx, y: y(-115) },
-  ];
+  const X = (u) => L.winW / 2 + (u - W / 2) * k;
+  const Y = (u) => L.winH / 2 + (u - H / 2) * k;
+  const over = v.overAge ?? 0;
+  const { left, right } = summaryPanels(L);
+  const out = [];
+  const line = (id, text, x, y, size, weight, color, extra = {}) =>
+    out.push({ id, text, x, y, size: size * k, weight, color, align: 'left', alpha: 1, ...extra });
+
+  out.push({ id: 'title', text: 'WRECKED', x: X(W / 2), y: Y(SUMMARY.title), size: 68 * k, weight: 'bold', color: PALETTE.danger, align: 'center', alpha: 1 });
   if (v.newBest) {
-    out.push({ id: 'best', text: 'NEW BEST!', size: 26 * k, weight: 'bold', color: PALETTE.combo[1], x: cx, y: y(-60), glow: true });
-  } else {
-    out.push({ id: 'best', text: `Best  ${v.highScore}`, size: 26 * k, weight: '600', color: SOFT, x: cx, y: y(-60) });
-  }
-  out.push(
-    { id: 'waveLabel', text: 'WAVE REACHED', size: 13 * k, weight: '600', color: DIM, x: cx - 130 * k, y: y(28) },
-    { id: 'waveValue', text: String(v.wave), size: 30 * k, weight: 'bold', color: PALETTE.player, x: cx - 130 * k, y: y(62) },
-    { id: 'comboLabel', text: 'PEAK COMBO', size: 13 * k, weight: '600', color: DIM, x: cx + 130 * k, y: y(28) },
-    { id: 'comboValue', text: String(v.peakCombo), size: 30 * k, weight: 'bold', color: PALETTE.combo[2], x: cx + 130 * k, y: y(62) },
-  );
-  if (v.overAge >= RESTART_GATE) {
     out.push({
-      id: 'prompt',
-      text: 'Click, Space or R to dive again',
-      size: 22 * k,
-      weight: 'bold',
-      color: PALETTE.dash,
-      x: cx,
-      y: y(150),
-      alpha: blinkAlpha(v.time, 5, 0.6),
+      id: 'best', text: 'NEW BEST!', x: X(W / 2), y: Y(SUMMARY.sub), size: 26 * k, weight: 'bold',
+      color: PALETTE.combo[1], align: 'center', alpha: 1, glow: true,
+    });
+  } else {
+    out.push({
+      id: 'best', text: `Best ${groupDigits(v.highScore)}`, x: X(W / 2), y: Y(SUMMARY.sub), size: 22 * k, weight: '600',
+      color: SOFT, align: 'center', alpha: 1,
+    });
+  }
+
+  // Left panel: the score counts up, then the medal, then the stats in two columns.
+  const lx = left.x + 26 * k;
+  const ly = (u) => Y(SUMMARY.panelTop + u);
+  line('scoreLabel', 'SCORE', lx, ly(34), 13, '600', DIM);
+  line('score', groupDigits(countUp(v.score ?? 0, over)), lx, ly(92), 56, 'bold', PALETTE.gold);
+  const medal = medalFor(v.score ?? 0);
+  const medalAlpha = clamp01((over - (COUNT_START + COUNT_LEN)) / 0.25);
+  if (medal) {
+    line('medal', medal.label, lx + 46 * k, ly(146), 20, 'bold', medal.color, { alpha: medalAlpha });
+  } else {
+    line('medal', `Reach ${groupDigits(MEDALS[MEDALS.length - 1].min)} for a medal`, lx, ly(146), 15, '600', DIM, { alpha: medalAlpha });
+  }
+  const stats = v.stats ?? [];
+  stats.forEach((s, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    // left.w is already in CSS px, so only the logical offsets are scaled here.
+    const sx = col === 0 ? left.x + 26 * k : left.x + left.w / 2 + 8 * k;
+    const reveal = clamp01((over - (1.2 + i * 0.15)) / 0.25);
+    line(`stat${i}`, s.label, sx, ly(206 + row * 58), 12, '600', DIM, { alpha: reveal });
+    const shown = typeof s.value === 'number' ? groupDigits(s.value) : String(s.value);
+    line(`statv${i}`, shown, sx, ly(232 + row * 58), 26, 'bold', PALETTE.player, { alpha: reveal });
+  });
+
+  // Right panel: the top five. This run's row is highlighted by the caller, using runRank.
+  const rx = right.x + 22 * k;
+  const ry = (u) => Y(SUMMARY.panelTop + u);
+  const tableAlpha = clamp01((over - 0.9) / 0.3);
+  line('tableHead', 'TOP SCORES', rx, ry(34), 13, '600', DIM, { alpha: tableAlpha });
+  const colScore = right.x + 200 * k;
+  const colWave = right.x + 282 * k;
+  const colTime = right.x + right.w - 22 * k;
+  const head = (id, text, x) => out.push({ id, text, x, y: ry(64), size: 12 * k, weight: '600', color: DIM, align: 'right', alpha: tableAlpha });
+  head('hScore', 'SCORE', colScore);
+  head('hWave', 'WAVE', colWave);
+  head('hTime', 'TIME', colTime);
+  const scores = v.scores ?? [];
+  for (let i = 0; i < TOP_N; i++) {
+    const e = scores[i];
+    const isRun = i === v.runRank;
+    const color = isRun ? PALETTE.gold : SOFT;
+    const y = ry(92 + i * 52);
+    const base = { y, weight: isRun ? 'bold' : '600', color, alpha: tableAlpha };
+    out.push({ id: `rank${i}`, text: `${i + 1}`, x: rx, size: 18 * k, align: 'left', ...base });
+    out.push({ id: `tscore${i}`, text: e ? groupDigits(e.score) : '—', x: colScore, size: 18 * k, align: 'right', ...base });
+    out.push({ id: `twave${i}`, text: e?.wave != null ? String(e.wave) : '—', x: colWave, size: 18 * k, align: 'right', ...base });
+    out.push({ id: `ttime${i}`, text: e?.seconds != null ? formatTime(e.seconds) : '—', x: colTime, size: 18 * k, align: 'right', ...base });
+  }
+  if (v.runRank < 0 && (v.score ?? 0) > 0) {
+    out.push({
+      id: 'thisRun', text: `This run  ${groupDigits(v.score)}`, x: rx, y: ry(352), size: 15 * k, weight: '600',
+      color: DIM, align: 'left', alpha: tableAlpha,
+    });
+  }
+
+  if (over >= SUMMARY_GATE) {
+    out.push({
+      id: 'prompt', text: 'Click, Space or R to dive again', x: X(W / 2), y: Y(SUMMARY.prompt), size: 22 * k,
+      weight: 'bold', color: PALETTE.dash, align: 'center', alpha: blinkAlpha(v.time ?? 0, 5, 0.6),
     });
   }
   return out;
@@ -684,37 +854,340 @@ function drawHud(ctx, L, game, hud, best, showBanners) {
   if (showBanners) drawBanners(ctx, L, hud);
 }
 
-function drawTitle(ctx, L, view) {
+// Runs `fn` in arena logical units (1280x720, centred in the window, scaled by L.hs). Glow radii passed to
+// shadowBlur are not transformed, so callers multiply them by k themselves (see glowBlur).
+function inArena(ctx, L, fn) {
   const k = L.hs;
-  const cx = L.winW / 2;
-  const Y = (v) => L.winH / 2 + (v - H / 2) * k;
-  const X = (v) => cx + (v - W / 2) * k;
-  dimWindow(ctx, L, 0.5);
   ctx.save();
-  ctx.shadowColor = PALETTE.player;
-  ctx.shadowBlur = 30 * k;
-  text(ctx, 'RIPTIDE RUSH', cx, Y(220), `bold ${96 * k}px ${FONT}`, PALETTE.player, 'center', 'middle');
+  ctx.translate(L.winW / 2, L.winH / 2);
+  ctx.scale(k, k);
+  ctx.translate(-W / 2, -H / 2);
+  fn(k);
   ctx.restore();
-  text(ctx, 'Dash through everything. Every kill refunds a charge.', cx, Y(300), `${24 * k}px ${FONT}`, PALETTE.dash, 'center', 'middle');
+}
 
-  const lines = [
-    ['WASD / Arrows', 'swim'],
-    ['Mouse', 'aim'],
-    ['Left click / Space', 'dash-slash toward the cursor'],
-    ['Right click / Shift', 'pulse: reflect bullets, stagger enemies'],
-    ['Esc / P', 'pause and options'],
-    ['M', 'mute'],
-  ];
-  lines.forEach(([keys, what], i) => {
-    const y = Y(380 + i * 30);
-    text(ctx, keys, X(W / 2 - 14), y, `${18 * k}px ${FONT}`, PALETTE.gold, 'right', 'alphabetic');
-    text(ctx, what, X(W / 2 + 14), y, `${18 * k}px ${FONT}`, 'rgba(234, 255, 255, 0.8)', 'left', 'alphabetic');
-  });
+// A bright band that travels across a run of text: base colour, a hot centre at position p (0..1 across), base again.
+function sweepGradient(ctx, x0, x1, base, hot, p) {
+  const g = ctx.createLinearGradient(x0, 0, x1, 0);
+  const c = (f) => clamp01(f);
+  g.addColorStop(0, base);
+  g.addColorStop(c(p - 0.12), base);
+  g.addColorStop(c(p), hot);
+  g.addColorStop(c(p + 0.12), base);
+  g.addColorStop(1, base);
+  return g;
+}
 
-  group(ctx, blinkAlpha(view.time, 4, 0.6), () => {
-    text(ctx, 'Click or press Space to dive in', cx, Y(600), `bold ${26 * k}px ${FONT}`, PALETTE.gold, 'center', 'middle');
+// A keycap drawn in arena units (the caller has scaled the context): a rounded key with its label.
+function keycap(ctx, label, cx, cy) {
+  ctx.font = `bold 15px ${FONT}`;
+  const w = Math.max(48, ctx.measureText(label).width + 22);
+  const h = 30;
+  ctx.fillStyle = 'rgba(234, 255, 255, 0.07)';
+  roundRect(ctx, cx - w / 2, cy - h / 2, w, h, 7);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(60, 242, 255, 0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // The darker lower edge gives the cap its weight.
+  ctx.fillStyle = 'rgba(60, 242, 255, 0.18)';
+  roundRect(ctx, cx - w / 2 + 2, cy + h / 2 - 5, w - 4, 3, 2);
+  ctx.fill();
+  text(ctx, label, cx, cy + 1, `bold 15px ${FONT}`, PALETTE.gold, 'center', 'middle');
+  return w;
+}
+
+// The figure-eight the title fish swims: x runs once around, y twice, so the path crosses itself.
+const EIGHT = Object.freeze({ cx: W / 2, cy: 430, ax: 300, ay: 56, speed: 0.75 });
+
+function drawTitle(ctx, L, view) {
+  const t = view.time ?? 0;
+  dimWindow(ctx, L, 0.45);
+  inArena(ctx, L, (k) => {
+    // The logo: a slow wobble, and a glow band that sweeps across the letters every few seconds.
+    ctx.save();
+    ctx.translate(W / 2, 196 + Math.sin(t * 1.7) * 3);
+    ctx.rotate(Math.sin(t * 1.1) * 0.025);
+    ctx.font = `bold 96px ${FONT}`;
+    const logoW = ctx.measureText('RIPTIDE RUSH').width;
+    // On a narrow window the logo shrinks to keep 40 px clear on each side.
+    const fit = Math.min(1, (L.winW / k - 80) / logoW);
+    ctx.scale(fit, fit);
+    const p = ((t % 3.6) / 3.6) * 1.5 - 0.25; // travels from before the left edge to past the right, then rests
+    ctx.shadowColor = PALETTE.player;
+    ctx.shadowBlur = 30 * k; // shadows are not transformed, so this one is in CSS px
+    ctx.fillStyle = sweepGradient(ctx, -logoW / 2, logoW / 2, PALETTE.player, '#ffffff', p);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('RIPTIDE RUSH', 0, 0);
+    ctx.restore();
+
+    text(ctx, 'Dash through everything. Every kill refunds a charge.', W / 2, 270, `24px ${FONT}`, PALETTE.dash, 'center', 'middle');
+
+    // The fish and three drifters on the figure-eight. Each drifter trails the fish a little further back.
+    const at = (a) => ({ x: EIGHT.cx + EIGHT.ax * Math.sin(a), y: EIGHT.cy + EIGHT.ay * Math.sin(2 * a) });
+    const heading = (a) => Math.atan2(2 * EIGHT.ay * Math.cos(2 * a), EIGHT.ax * Math.cos(a));
+    const th = t * EIGHT.speed;
+    // The path itself, faint, so the figure-eight reads as one loop rather than random swimming.
+    ctx.beginPath();
+    for (let i = 0; i <= 96; i++) {
+      const q = at((i / 96) * Math.PI * 2);
+      if (i === 0) ctx.moveTo(q.x, q.y);
+      else ctx.lineTo(q.x, q.y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(60, 242, 255, 0.12)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    [
+      { lag: 0.55, size: 1.05 },
+      { lag: 1.1, size: 0.9 },
+      { lag: 1.75, size: 0.8 },
+    ].forEach(({ lag, size }) => {
+      const a = th - lag;
+      const q = at(a);
+      draw.enemy(ctx, 'drifter', q.x, q.y, heading(a), t, { scale: size * 1.2 });
+    });
+    const f = at(th);
+    draw.player(ctx, f.x, f.y, heading(th), t, { scale: 1.5 });
+
+    // Controls: key caps with what each one does. Three groups across, centred.
+    const groups = [
+      { keys: 'WASD', what: 'swim' },
+      { keys: 'MOUSE', what: 'aim' },
+      { keys: 'CLICK · SPACE', what: 'dash-slash' },
+      { keys: 'RIGHT · SHIFT', what: 'pulse' },
+    ];
+    groups.forEach((g, i) => {
+      const cx = W / 2 + (i - 1.5) * 180;
+      keycap(ctx, g.keys, cx, 540);
+      text(ctx, g.what, cx, 582, `16px ${FONT}`, SOFT, 'center', 'middle');
+    });
+
+    group(ctx, blinkAlpha(t, 4, 0.6), () => {
+      text(ctx, 'Click or press Space to dive in', W / 2, 630, `bold 26px ${FONT}`, PALETTE.gold, 'center', 'middle');
+    });
+    const best = view.highScore > 0 ? `BEST  ${groupDigits(view.highScore)}` : 'No best yet';
+    text(ctx, best, W / 2, 670, `20px ${FONT}`, DIM, 'center', 'middle');
+    text(ctx, 'M  mute        Esc  options', W / 2, 702, `14px ${FONT}`, FAINT, 'center', 'middle');
   });
-  text(ctx, `Best: ${view.highScore}`, cx, Y(648), `${20 * k}px ${FONT}`, DIM, 'center', 'middle');
+}
+
+// ---- first-run how-to (#110) -------------------------------------------------------------------------
+// Three cards, one at a time. Each has a short animation drawn in arena units (see inArena).
+export const HOWTO_CARDS = Object.freeze([
+  {
+    id: 'dash',
+    title: 'DASH THROUGH',
+    lines: ['Dash-slash through enemies to kill them.', 'Every kill refunds a dash charge straight away.'],
+    keys: 'Left click or Space',
+  },
+  {
+    id: 'chain',
+    title: 'CHAIN KILLS',
+    lines: ['Each kill adds to your combo and multiplies', 'your score. Keep the chain before the timer runs out.'],
+    keys: 'The bar under the score is your combo timer',
+  },
+  {
+    id: 'pulse',
+    title: 'PULSE REFLECTS',
+    lines: ['A short pulse reflects enemy bullets back at their shooters.', 'Time it for a perfect pulse: slow motion and a quick cooldown.'],
+    keys: 'Right click or Shift',
+  },
+]);
+
+const CARD = Object.freeze({ x: 320, y: 96, w: 640, h: 440 });
+
+// The how-to card, the skip button and the card dots, in CSS px.
+export function howtoLayout(L) {
+  const k = L.hs;
+  const X = (u) => L.winW / 2 + (u - W / 2) * k;
+  const Y = (u) => L.winH / 2 + (u - H / 2) * k;
+  return {
+    k,
+    X,
+    Y,
+    card: { x: X(CARD.x), y: Y(CARD.y), w: CARD.w * k, h: CARD.h * k },
+    skip: { x: X(CARD.x + CARD.w - 170), y: Y(CARD.y + 14), w: 150 * k, h: 30 * k },
+    dotsY: Y(CARD.y + CARD.h + 34),
+  };
+}
+
+// What a click at CSS (x, y) hits on the how-to screen: 'skip', or null.
+export function howtoHit(L, x, y) {
+  const g = howtoLayout(L);
+  return inside(g.skip, x, y) ? 'skip' : null;
+}
+
+// Each illustration runs on its own clock, in arena units centred on (W/2, H/2).
+const ILLUSTRATION = {
+  // A fish dashes left to right through three drifters. Each one dies as the fish reaches it.
+  dash(ctx, t, k) {
+    const period = 2.6;
+    const p = (t % period) / period;
+    const x0 = 360;
+    const x1 = 920;
+    const y = 232;
+    const fx = x0 + (x1 - x0) * clamp01(p / 0.6);
+    const fade = p < 0.08 ? p / 0.08 : p > 0.9 ? (1 - p) / 0.1 : 1;
+    const drifters = [560, 680, 800];
+    ctx.save();
+    ctx.globalAlpha = clamp01(fade);
+    // The dash streak, behind the fish.
+    if (p < 0.6) {
+      const g = ctx.createLinearGradient(x0, 0, fx, 0);
+      g.addColorStop(0, 'rgba(234, 255, 255, 0)');
+      g.addColorStop(1, PALETTE.dash);
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x0, y);
+      ctx.lineTo(fx, y);
+      ctx.stroke();
+    }
+    drifters.forEach((dx, i) => {
+      const dy = y + (i === 1 ? -26 : i === 2 ? 22 : 0);
+      if (fx < dx - 10) {
+        draw.enemy(ctx, 'drifter', dx, dy, 0, t, { scale: 1.2 });
+      } else {
+        // A thin ring where the drifter died, fading as it grows.
+        const age = clamp01((fx - dx) / 70);
+        ctx.save();
+        ctx.globalAlpha *= 1 - age;
+        ctx.strokeStyle = PALETTE.gold;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(dx, dy, 10 + 30 * age, 0, TAU);
+        ctx.stroke();
+        ctx.restore();
+      }
+    });
+    draw.player(ctx, fx, y, 0, t, { scale: 1.35 });
+    ctx.restore();
+  },
+
+  // The combo counts up through the tiers; the multiplier steps at each 5 kills.
+  chain(ctx, t, k) {
+    const count = Math.floor((t * 1.5) % 8);
+    const mult = multiplierFor(count);
+    const tier = tierFor(count);
+    const color = PALETTE.combo[tier] ?? PALETTE.player;
+    const pop = 1 + 0.18 * Math.max(0, 1 - ((t * 1.5) % 1) / 0.25);
+    text(ctx, 'COMBO', W / 2, 180, `600 16px ${FONT}`, DIM, 'center', 'middle');
+    ctx.save();
+    ctx.translate(W / 2, 236);
+    ctx.scale(pop, pop);
+    text(ctx, `${count}`, 0, 0, `bold 72px ${FONT}`, color, 'center', 'middle');
+    ctx.restore();
+    text(ctx, `x${mult}`, W / 2 + 92, 236, `bold 40px ${FONT}`, PALETTE.gold, 'center', 'middle');
+    // Eight pips: lit up to the combo.
+    for (let i = 0; i < 8; i++) {
+      const px = W / 2 + (i - 3.5) * 40;
+      ctx.beginPath();
+      ctx.arc(px, 318, 10, 0, TAU);
+      if (i < count) {
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 10 * k;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      } else {
+        ctx.strokeStyle = 'rgba(234, 255, 255, 0.35)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+  },
+
+  // A spitter fires; the fish pulses and the bullet turns back and downs the spitter. Three seconds a loop.
+  pulse(ctx, t, k) {
+    const c = t % 3;
+    const fishX = 470; // the ring reaches 110 units either side, so the fish sits well inside the card
+    const spitX = 910;
+    const y = 262;
+    const hitX = fishX + 110;
+    // The spitter is there until its bullet comes back to it, then it bursts.
+    if (c < 1.5) draw.enemy(ctx, 'spitter', spitX, y, Math.PI, t, { scale: 1.25 });
+    else {
+      const age = clamp01((c - 1.5) / 0.4);
+      ctx.strokeStyle = PALETTE.gold;
+      ctx.lineWidth = 3 * (1 - age);
+      ctx.beginPath();
+      ctx.arc(spitX, y, 10 + 40 * age, 0, TAU);
+      ctx.stroke();
+    }
+    // The bullet flies left, meets the pulse ring, then flies back.
+    if (c >= 0.3 && c < 1.5) {
+      const bx = c < 0.9 ? spitX - ((c - 0.3) / 0.6) * (spitX - hitX) : hitX + ((c - 0.9) / 0.6) * (spitX - hitX);
+      draw.bullet(ctx, bx, y, t, {});
+    }
+    // The pulse ring grows out from the fish as the bullet meets it, then fades.
+    if (c >= 0.7 && c < 1.5) {
+      const r = 110 * clamp01((c - 0.7) / 0.2);
+      draw.pulse(ctx, fishX, y, r, clamp01(1 - (c - 0.9) / 0.6));
+    }
+    if (c >= 0.9 && c < 1.6) {
+      text(ctx, 'REFLECTED', fishX, y - 48, `bold 16px ${FONT}`, PALETTE.player, 'center', 'middle');
+    }
+    draw.player(ctx, fishX, y, 0, t, { scale: 1.35 });
+  },
+};
+
+// The how-to screen: one card at a time, with its illustration, the skip button and the card dots.
+function drawHowto(ctx, L, view) {
+  dimWindow(ctx, L, 0.72);
+  const g = howtoLayout(L);
+  const k = g.k;
+  const index = clamp(view.howtoIndex ?? 0, 0, HOWTO_CARDS.length - 1);
+  const card = HOWTO_CARDS[index];
+  const t = view.time ?? 0;
+  const X = (u) => g.X(u);
+  const Y = (u) => g.Y(u);
+
+  // The card panel. Nearly opaque, so the paused arena's ghost aim line does not show through the card.
+  ctx.fillStyle = 'rgba(3, 8, 20, 0.96)';
+  roundRect(ctx, g.card.x, g.card.y, g.card.w, g.card.h, 16 * k);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(60, 242, 255, 0.3)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  text(ctx, `HOW TO PLAY   ${index + 1} / ${HOWTO_CARDS.length}`, g.card.x + 26 * k, Y(CARD.y + 30), `600 ${14 * k}px ${FONT}`, DIM, 'left', 'middle');
+  text(ctx, 'Esc  skip', g.skip.x + g.skip.w, Y(CARD.y + 30), `600 ${14 * k}px ${FONT}`, PALETTE.player, 'right', 'middle');
+
+  // The illustration sits in its own strip of the card, clipped to it, drawn in arena units.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(g.card.x, Y(CARD.y + 56), g.card.w, 236 * k);
+  ctx.clip();
+  ctx.translate(L.winW / 2, L.winH / 2);
+  ctx.scale(k, k);
+  ctx.translate(-W / 2, -H / 2);
+  ILLUSTRATION[card.id](ctx, t, k);
+  ctx.restore();
+
+  text(ctx, card.title, X(W / 2), Y(CARD.y + 318), `bold ${30 * k}px ${FONT}`, PALETTE.gold, 'center', 'middle');
+  card.lines.forEach((line, i) => {
+    text(ctx, line, X(W / 2), Y(CARD.y + 352 + i * 26), `${18 * k}px ${FONT}`, SOFT, 'center', 'middle');
+  });
+  text(ctx, card.keys, X(W / 2), Y(CARD.y + 412), `600 ${16 * k}px ${FONT}`, PALETTE.player, 'center', 'middle');
+
+  // The dots, one per card; the current one is filled.
+  HOWTO_CARDS.forEach((_, i) => {
+    const dx = X(W / 2) + (i - (HOWTO_CARDS.length - 1) / 2) * 22 * k;
+    ctx.beginPath();
+    ctx.arc(dx, g.dotsY, 5 * k, 0, TAU);
+    if (i === index) {
+      ctx.fillStyle = PALETTE.player;
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(234, 255, 255, 0.4)';
+      ctx.lineWidth = 1.5 * k;
+      ctx.stroke();
+    }
+  });
+  text(ctx, 'Click or Space: next     Left / Right: browse', X(W / 2), Y(CARD.y + CARD.h + 72), `${15 * k}px ${FONT}`, FAINT, 'center', 'middle');
 }
 
 function drawOptions(ctx, L, view) {
@@ -751,6 +1224,7 @@ function drawOptions(ctx, L, view) {
     if (row.id === 'volume') value = `${Math.round(s.volume * 100)}%`;
     else if (row.id === 'muted') value = s.muted ? 'On' : 'Off';
     else if (row.id === 'shake') value = `${Math.round(s.shake * 100)}%`;
+    else if (row.id === 'howto') value = '›';
     else value = s.reducedFlashes ? 'On' : 'Off';
     text(ctx, value, p.x + p.w - 22 * k, row.cy, `bold ${18 * k}px ${FONT}`, PALETTE.gold, 'right', 'middle');
 
@@ -766,7 +1240,7 @@ function drawOptions(ctx, L, view) {
       ctx.fill();
     }
   }
-  text(ctx, 'Up/Down select   Left/Right change   Enter toggle', p.x + p.w / 2, p.y + 290 * k, `${13 * k}px ${FONT}`, FAINT, 'center', 'middle');
+  text(ctx, 'Up/Down select   Left/Right change   Enter toggle', p.x + p.w / 2, p.y + 342 * k, `${13 * k}px ${FONT}`, FAINT, 'center', 'middle');
 }
 
 function drawPaused(ctx, L, view) {
@@ -780,24 +1254,75 @@ function drawPaused(ctx, L, view) {
 }
 
 function drawGameOver(ctx, L, view) {
-  dimWindow(ctx, L, 0.6);
+  dimWindow(ctx, L, 0.62);
+  const k = L.hs;
+  const Y = (u) => L.winH / 2 + (u - H / 2) * k;
+  const game = view.game;
+  const over = view.overAge ?? 0;
+  const rank = view.runRank ?? -1;
+  const panels = summaryPanels(L);
+  for (const p of [panels.left, panels.right]) {
+    // Nearly opaque, so the arena's drifters drifting behind the summary do not show through the stats.
+    ctx.fillStyle = 'rgba(3, 8, 20, 0.94)';
+    roundRect(ctx, p.x, p.y, p.w, p.h, 14 * k);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(60, 242, 255, 0.3)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // This run's row in the table is highlighted.
+  if (rank >= 0 && rank < TOP_N) {
+    const rowY = Y(SUMMARY.panelTop + 92 + rank * 52) - 22 * k;
+    ctx.fillStyle = 'rgba(255, 224, 102, 0.14)';
+    roundRect(ctx, panels.right.x + 10 * k, rowY, panels.right.w - 20 * k, 44 * k, 8 * k);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 224, 102, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // The medal badge appears once the count-up has finished.
+  const medal = medalFor(game.score);
+  const medalAlpha = clamp01((over - (COUNT_START + COUNT_LEN)) / 0.25);
+  if (medal && medalAlpha > 0) {
+    const bx = panels.left.x + 26 * k + 14 * k;
+    const by = Y(SUMMARY.panelTop + 146);
+    ctx.save();
+    ctx.globalAlpha = ctx.globalAlpha * medalAlpha;
+    ctx.beginPath();
+    ctx.arc(bx, by, 14 * k, 0, TAU);
+    ctx.fillStyle = medal.color;
+    ctx.shadowColor = medal.color;
+    ctx.shadowBlur = 12 * k;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(bx, by, 8 * k, 0, TAU);
+    ctx.strokeStyle = 'rgba(2, 6, 16, 0.55)';
+    ctx.lineWidth = 2 * k;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   const entries = gameOverEntries(L, {
-    score: view.game.score,
+    score: game.score,
     highScore: view.highScore,
     newBest: view.newBest,
-    wave: view.game.wave.number,
-    peakCombo: view.hud.peakCombo,
-    overAge: view.overAge,
+    overAge: over,
     time: view.time,
+    stats: runStats(game, view.hud),
+    scores: view.scores,
+    runRank: rank,
   });
   for (const e of entries) {
     ctx.save();
     ctx.globalAlpha = ctx.globalAlpha * (e.alpha ?? 1);
     if (e.glow) {
       ctx.shadowColor = e.color;
-      ctx.shadowBlur = 18 * L.hs;
+      ctx.shadowBlur = 18 * k;
     }
-    text(ctx, e.text, e.x, e.y, `${e.weight} ${e.size}px ${FONT}`, e.color, 'center', 'middle');
+    text(ctx, e.text, e.x, e.y, `${e.weight} ${e.size}px ${FONT}`, e.color, e.align ?? 'center', 'middle');
     ctx.restore();
   }
 }
@@ -813,6 +1338,7 @@ export function drawHudLayer(ctx, L, view) {
   if (game && screen === 'playing') drawHud(ctx, L, game, hud, view.highScore ?? 0, true);
   if (game && screen === 'paused') drawHud(ctx, L, game, hud, view.highScore ?? 0, false);
   if (screen === 'title') drawTitle(ctx, L, view);
+  if (screen === 'howto') drawHowto(ctx, L, view);
   if (screen === 'paused') drawPaused(ctx, L, view);
   if (screen === 'over' && game) drawGameOver(ctx, L, { ...view, hud });
   if (settings.muted) text(ctx, 'MUTED (M)', L.winW / 2, 32 * L.hs, `600 ${13 * L.hs}px ${FONT}`, DIM, 'center');

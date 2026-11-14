@@ -2,7 +2,7 @@
 // and per-mode best storage. Pure: no DOM, no window at import time. Storage functions take any object with
 // getItem/setItem (or null) and never throw, so blocked or missing localStorage gives the defaults.
 // Spec: docs/design/replayability.md §5.1 (Daily Tide), §5.2 (challenges); issues #115, #116; task #124.
-import { HIGH_SCORE_KEY } from './config.js';
+import { loadScores, topScore } from './scores.js';
 
 export const MODE_KEY = 'riptide.mode.v1';
 export const CHALLENGE_KEY = 'riptide.challenges.v1';
@@ -184,22 +184,9 @@ export function saveMode(storage, modeId) {
   }
 }
 
-// Classic keeps the existing single best (the high-score key), so nothing needs migrating.
+// Classic's best is the top of the existing top-five list (scores.js), so there is no second key to keep in step.
 export function loadClassicBest(storage) {
-  try {
-    return Number(storage?.getItem(HIGH_SCORE_KEY)) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveClassicBest(storage, score) {
-  try {
-    storage?.setItem(HIGH_SCORE_KEY, String(score));
-    return true;
-  } catch {
-    return false;
-  }
+  return topScore(loadScores(storage));
 }
 
 function loadChallenges(storage) {
@@ -225,11 +212,12 @@ export function bestScore(storage, modeId, dayKey) {
   return 0;
 }
 
-// Records a finished run and returns what it counted as. A challenge or Classic run is compared with that
-// mode's own best and never touches another mode's. Daily Tide records one official attempt per UTC day:
-// the first finished run. Later runs that day are practice and do not change the record.
+// Records a finished run for the modes that keep their own best and returns what it counted as. A challenge
+// run is compared with that mode's own best and never touches another mode's. Daily Tide records one official
+// attempt per UTC day: the first finished run. Later runs that day are practice and do not change the record.
+// Classic runs go onto the top-five list in main.js (scores.js), so this does nothing for Classic.
 // run: { score, wave, combo }. Returns { newBest, official, best }.
-export function recordRun(storage, modeId, dayKey, run) {
+export function recordModeRun(storage, modeId, dayKey, run) {
   const score = Math.max(0, Math.floor(Number(run.score) || 0));
   const wave = Math.max(0, Math.floor(Number(run.wave) || 0));
   const combo = Math.max(0, Math.floor(Number(run.combo) || 0));
@@ -259,8 +247,5 @@ export function recordRun(storage, modeId, dayKey, run) {
     return { newBest, official: false, best: Math.max(prev, score) };
   }
 
-  const prev = loadClassicBest(storage);
-  const newBest = score > prev;
-  if (newBest) saveClassicBest(storage, score);
-  return { newBest, official: false, best: Math.max(prev, score) };
+  return { newBest: false, official: false, best: loadClassicBest(storage) };
 }
