@@ -51,6 +51,7 @@ export const PULSE = {
   cooldown: 2.5,        // seconds
   stagger: 0.7,         // seconds an enemy is stunned by a pulse (placeholder)
   perfectWindow: 0.12,  // a bullet this close (seconds) to impact makes the pulse perfect
+  perfectBonus: 150,    // points awarded by a perfect pulse (flat, not multiplied by the combo)
   reflectSpeedScale: 2, // reflected bullets fly back at this multiple of their speed (placeholder)
   reflectLife: 2.5,     // seconds a reflected bullet stays alive
   slowmoDuration: 0.35, // seconds of world slow-motion after a perfect pulse (placeholder)
