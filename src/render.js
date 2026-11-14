@@ -29,8 +29,25 @@ const ARENA_BOUNDS = Object.freeze({
   maxY: H - ARENA.inset,
 });
 
+// Motion polish (presentation only). Each value is kept small so it adds weight without hiding anything.
+const STRETCH_DASH = 1.3; // the player stretches to this much along the dash while dashing
+const SPRING_W = 28; // stretch spring: angular frequency (rad/s)
+const SPRING_ZETA = 0.45; // damping ratio: about 20% overshoot when it settles
+const POP_SQUASH_END = 0.3; // a death pop squashes for this fraction of its life, then pops out
+const POP_SQUASH_X = 0.7; // along the squash axis (the dash direction) while squashed
+const POP_SQUASH_Y = 1.25; // across the squash axis while squashed
+const POP_OUT = 1.35; // scale the pop expands to as it fades
+const BOB_PX = 2.5; // pickups bob by this many logical px...
+const BOB_RATE = 2.6; // ...at this rate (rad/s)
+const DARK_R_IN = 60; // the hit-stop darkening is clear inside this radius around the kill...
+const DARK_R_OUT = 300; // ...and fully dark at this one
+const ZOOM_OUT = 0.98; // the arena eases out by 2% in the top combo tiers...
+const ZOOM_TIER = 3; // ...tier 3 (magenta) and tier 4 (white)
+const ZOOM_RATE = 4; // ease rate for the zoom (1/s)
+
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const NO_KICK = Object.freeze({ x: 0, y: 0 });
 
 // ---- enemy drawing ---------------------------------------------------------------------------------
 // art.js ignores unknown enemy types silently. To show a visible fallback instead, each type is probed
@@ -178,11 +195,47 @@ function drawEnemies(ctx, game, view) {
   }
 }
 
+// Death pops: an enemy that dies squashes along the dash direction, then pops out and fades, instead of
+// vanishing. The records come from fx (real time, so they show through hit-stop). Each is drawn at its
+// kill point with the same art as the live enemy.
+function drawPops(ctx, fx, t, flashes) {
+  // The optional fx calls let a partial stand-in (in tests) render without the newer effects.
+  for (const p of fx.getPops?.() ?? []) {
+    if (!p.alive) continue;
+    const k = clamp01(p.age / p.life);
+    let sx;
+    let sy;
+    let alpha = 1;
+    if (k < POP_SQUASH_END) {
+      const q = k / POP_SQUASH_END;
+      sx = 1 + (POP_SQUASH_X - 1) * q;
+      sy = 1 + (POP_SQUASH_Y - 1) * q;
+    } else {
+      const q = (k - POP_SQUASH_END) / (1 - POP_SQUASH_END);
+      const e = 1 - (1 - q) * (1 - q) * (1 - q); // ease out of the squash into the pop
+      sx = lerp(POP_SQUASH_X, POP_OUT, e);
+      sy = lerp(POP_SQUASH_Y, POP_OUT, e);
+      alpha = 1 - q * q;
+    }
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.angle);
+    ctx.scale(sx, sy);
+    ctx.rotate(-p.angle);
+    // A white flash on the first instant, so the death reads as a hit. Reduced flashes keep the squash only.
+    const flash = flashes ? Math.max(0, 1 - k * 3) : 0;
+    drawEnemy(ctx, p.kind, ENEMY[p.kind]?.radius ?? 14, 0, 0, 0, t, { scale: 1, flash });
+    ctx.restore();
+  }
+}
+
 function drawBullets(ctx, game, view) {
   for (const b of game.bullets) {
     const x = lerp(b.px, b.x, view.alpha);
     const y = lerp(b.py, b.y, view.alpha);
-    draw.bullet(ctx, x, y, view.time, { reflected: b.owner === 'player', scale: 1 });
+    // The velocity lets art.js draw the motion trail behind the bullet (#100).
+    draw.bullet(ctx, x, y, view.time, { reflected: b.owner === 'player', scale: 1, vx: b.vx, vy: b.vy });
   }
 }
 
@@ -223,17 +276,54 @@ function drawDashFeedback(ctx, game) {
   ctx.restore();
 }
 
+// Stretch along the dash: a damped spring toward STRETCH_DASH while dashing and back to 1 afterwards,
+// with a slight overshoot. Runs on real time (view.dt is 0 when paused), in short substeps for stability.
+let stretch = 1;
+let stretchV = 0;
+function stepStretch(target, dt) {
+  let left = Math.min(Math.max(dt, 0), 0.1);
+  while (left > 0) {
+    const h = Math.min(left, 1 / 240);
+    const acc = -SPRING_W * SPRING_W * (stretch - target) - 2 * SPRING_ZETA * SPRING_W * stretchV;
+    stretchV += acc * h;
+    stretch += stretchV * h;
+    left -= h;
+  }
+  return stretch;
+}
+
 function drawPlayer(ctx, game, view) {
   const p = game.player;
   const x = lerp(p.px, p.x, view.alpha);
   const y = lerp(p.py, p.y, view.alpha);
   const dashing = !!p.dash.active;
+  // Squash and stretch: stretched along the facing (the dash direction), area kept by the cross axis.
+  const s = stepStretch(dashing ? STRETCH_DASH : 1, view.dt);
+  const stretched = Math.abs(s - 1) > 0.002;
+  if (stretched) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(p.facing);
+    ctx.scale(s, 1 / Math.sqrt(s));
+    ctx.rotate(-p.facing);
+    ctx.translate(-x, -y);
+  }
   draw.player(ctx, x, y, p.facing, view.time, {
     dashing,
     // Post-hit invulnerability blinks; a dash is invulnerable too but does not blink.
     invulnerable: p.invuln > 0 && !dashing,
     charges: p.dash.charges,
   });
+  if (stretched) ctx.restore();
+}
+
+// Pickups bob on their own phase. drawPickups reads only each item's position, so the bob goes into a
+// copy of the item list; the game state is not changed.
+function pickupsBobbed(game, t) {
+  const items = game.pickups.items;
+  if (items.length === 0) return game;
+  const bobbed = items.map((it) => ({ ...it, y: it.y + BOB_PX * Math.sin(t * BOB_RATE + it.id * 0.7) }));
+  return { ...game, pickups: { ...game.pickups, items: bobbed } };
 }
 
 // Pulse shockwaves: the art ring grows and fades; a reflected perfect pulse adds a gold ring.
@@ -255,55 +345,135 @@ function drawRings(ctx, rings) {
   }
 }
 
-// The letterbox bands around the arena: the same deep-sea gradient, drawn in window pixels.
-function drawBands(ctx, L) {
-  const g = ctx.createLinearGradient(0, 0, 0, L.winH);
-  g.addColorStop(0, PALETTE.deepTop);
-  g.addColorStop(1, PALETTE.deepBottom);
+// Hit-stop darkening on a big multi-kill: the arena backdrop dims away from the kill, and the kill's
+// own area stays clear. It is drawn under the entities, so nothing gameplay-relevant is dimmed.
+function drawDarken(ctx, fx) {
+  const d = fx.getDarken?.();
+  if (!d) return;
+  const k = d.life / d.dur; // 1 at the kill, 0 when the darkening is over
+  const a = d.alpha * k * k;
+  if (a < 0.003) return;
+  const g = ctx.createRadialGradient(d.x, d.y, DARK_R_IN, d.x, d.y, DARK_R_OUT);
+  g.addColorStop(0, 'rgba(2, 4, 12, 0)');
+  g.addColorStop(1, 'rgba(2, 4, 12, 1)');
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = a;
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, L.winW, L.winH);
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
 }
 
-// view:{ screen, game, alpha, time, dt, highScore, newBest, overAge, muted, fx, rings, layout, hud, settings, menuRow }
+// The combo zoom: the arena eases out by 2% while the combo sits in its top tiers, and back in afterwards.
+// Frozen while paused (dt is 0), so it never jumps on resume.
+let zoom = 1;
+function zoomNow(game, screen, dt) {
+  const target = screen === 'playing' && game && game.combo.tier >= ZOOM_TIER ? ZOOM_OUT : 1;
+  if (dt > 0) zoom += (target - zoom) * (1 - Math.exp(-Math.min(dt, 0.1) * ZOOM_RATE));
+  return zoom;
+}
+
+// The zoom in effect now (1 normally). main.js inverts it when mapping pointer positions to the arena.
+export function currentZoom() {
+  return zoom;
+}
+
+// The letterbox bands around the arena: the same deep-sea gradient, drawn in window pixels. Only the strips
+// outside the arena are filled, and nothing at all when the arena fills the window.
+let bandGradient = null;
+let bandGradientH = -1;
+function drawBands(ctx, L) {
+  const sides = L.px > 0.5;
+  const tops = L.py > 0.5;
+  if (!sides && !tops) return;
+  if (bandGradient === null || bandGradientH !== L.winH) {
+    bandGradient = ctx.createLinearGradient(0, 0, 0, L.winH);
+    bandGradient.addColorStop(0, PALETTE.deepTop);
+    bandGradient.addColorStop(1, PALETTE.deepBottom);
+    bandGradientH = L.winH;
+  }
+  ctx.fillStyle = bandGradient;
+  if (sides) {
+    const right = L.px + L.pw;
+    ctx.fillRect(0, 0, L.px, L.winH);
+    ctx.fillRect(right, 0, L.winW - right, L.winH);
+  }
+  if (tops) {
+    const bottom = L.py + L.ph;
+    ctx.fillRect(0, 0, L.winW, L.py);
+    ctx.fillRect(0, bottom, L.winW, L.winH - bottom);
+  }
+}
+
+// view:{ screen, game, alpha, time, dt, highScore, newBest, overAge, muted, fx, rings, layout, hud, settings, menuRow, timings }
 // `layout` comes from computeLayout(); without it the canvas size is used, which is what the tests do.
+// `timings` is optional: when given, each section's ms is added to it (tools/perf.html uses this).
 export function drawFrame(ctx, view) {
   const L = view.layout ?? computeLayout(ctx.canvas.width, ctx.canvas.height);
   const dev = ctx.canvas.width / L.winW; // device pixels per CSS px
   const settings = view.settings ?? DEFAULT_SETTINGS;
   const hud = view.hud ?? createHud();
+  // Section timer for tools/perf.html. Canvas work is rasterised lazily, so the timer flushes (a 1x1 read)
+  // at each boundary to charge the raster to the section that issued it. Off in play.
+  const T = view.timings;
+  let lapT = T ? performance.now() : 0;
+  const lap = (name) => {
+    if (!T) return;
+    ctx.getImageData(0, 0, 1, 1);
+    const now = performance.now();
+    T[name] = (T[name] ?? 0) + (now - lapT);
+    lapT = now;
+  };
 
   ctx.setTransform(dev, 0, 0, dev, 0, 0);
   drawBands(ctx, L);
+  lap('bands');
 
-  // The arena, letterboxed in the middle of the window.
-  const k = dev * L.s;
-  ctx.setTransform(k, 0, 0, k, dev * L.px, dev * L.py);
+  // The arena, letterboxed in the middle of the window, with the combo zoom about its centre.
+  const z = zoomNow(view.game, view.screen, view.dt);
+  const base = dev * L.s;
+  ctx.setTransform(base * z, 0, 0, base * z, dev * L.px + (1 - z) * (W / 2) * base, dev * L.py + (1 - z) * (H / 2) * base);
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
   draw.background(ctx, W, H, view.time);
+  lap('background');
 
   const { game, screen, fx } = view;
   if (screen !== 'title' && game) {
-    // The shake offsets the world (entities, pulses, particles), not the HUD or the arena backdrop.
-    // The Screen shake option scales it: 100%, 50% or 0%.
+    // Shake and the dash camera kick offset the world (entities, pulses, particles), not the HUD or the
+    // arena backdrop. The Screen shake option scales both: 100%, 50% or 0%.
     const shake = fx.getShakeOffset();
+    const kick = fx.getKickOffset?.() ?? NO_KICK;
     ctx.save();
-    ctx.translate(shake.x * settings.shake, shake.y * settings.shake);
+    ctx.translate((shake.x + kick.x) * settings.shake, (shake.y + kick.y) * settings.shake);
     const avoid = hudRectsLogical(L, Object.keys(game.modifiers).length);
+    if (!settings.reducedFlashes) drawDarken(ctx, fx); // a full-arena effect, so reduced flashes skip it
+    lap('darken');
     drawWarnings(ctx, game, view.time, avoid);
-    drawPickups(ctx, game, view.alpha, view.time); // PICKUPS (#54): pickups, shield aura, pickup fx
+    lap('warnings');
+    drawPickups(ctx, pickupsBobbed(game, view.time), view.alpha, view.time); // PICKUPS (#54): pickups, shield aura, pickup fx
+    lap('pickups');
     drawEnemies(ctx, game, view);
+    drawPops(ctx, fx, view.time, !settings.reducedFlashes);
+    lap('enemies');
     drawBullets(ctx, game, view);
+    lap('bullets');
     drawDashFeedback(ctx, game);
+    lap('dashFeedback');
     drawPlayer(ctx, game, view);
+    lap('player');
     drawRings(ctx, view.rings);
+    lap('rings');
     fx.drawWorld(ctx);
+    lap('fxWorld');
     ctx.restore();
     // Reduced flashes: no full-screen flash or vignette pulse.
     if (!settings.reducedFlashes) fx.drawScreen(ctx, W, H);
+    lap('fxScreen');
   }
 
   // HUD, title, pause and game-over screens, in window pixels, scaled by L.hs and not by the arena.
   ctx.setTransform(dev, 0, 0, dev, 0, 0);
   drawHudLayer(ctx, L, { ...view, hud, settings, muted: settings.muted, menuRow: view.menuRow ?? 0 });
+  lap('hud');
 }

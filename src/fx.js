@@ -13,6 +13,12 @@ export const SHAKE_MAX_OFFSET = 14; // px at full trauma
 export const SHAKE_DECAY_S = 0.3; // trauma goes 1 -> 0 in this many real seconds
 export const HITSTOP_MAX_S = 0.12; // stacked hit-stop is capped at this
 export const HITSTOP_RECOVER_S = 0.08; // time scale eases 0 -> 1 over this window
+export const FX_MAX_POPS = 48; // enemies mid squash-and-pop at once
+export const POP_LIFE_S = 0.26; // a death pop lasts this long (real time)
+export const KICK_MAX_PX = 8; // camera kick is capped at this many px
+export const KICK_DECAY = 22; // the kick falls by e every 1 / KICK_DECAY s (real time)
+// Quality steps (see setQuality): the share of burst particles spawned at each level.
+export const FX_QUALITY_BURST_SCALE = Object.freeze([1, 0.6, 0.35]);
 
 const SLOW_RECOVER_S = 0.08;
 const SHAKE_FREQ = 38; // noise samples per second
@@ -141,6 +147,10 @@ function makeParticle() {
   };
 }
 
+function makePop() {
+  return { alive: false, kind: '', x: 0, y: 0, angle: 0, age: 0, life: POP_LIFE_S };
+}
+
 function makeTrail() {
   return { alive: false, x: 0, y: 0, angle: 0, age: 0, life: 1, length: 40, width: 20, color: '#eaffff', alpha: 0.6 };
 }
@@ -194,6 +204,16 @@ export function createFx(options = {}) {
   let vigLeft = 0;
   let vigDur = VIGNETTE_DECAY_S;
 
+  // Presentation-only state (presets and the renderer never read it back into the simulation).
+  let quality = 0; // index into FX_QUALITY_BURST_SCALE; 0 is full detail
+  const pops = new Array(FX_MAX_POPS);
+  for (let i = 0; i < FX_MAX_POPS; i++) pops[i] = makePop();
+  let popHead = 0;
+  const kickOut = { x: 0, y: 0 };
+  let kickX = 0;
+  let kickY = 0;
+  const dark = { x: 0, y: 0, alpha: 0, life: 0, dur: 1 };
+
   function pick(color) {
     if (Array.isArray(color)) {
       if (color.length === 0) return '#ffffff';
@@ -214,7 +234,9 @@ export function createFx(options = {}) {
   }
 
   function burst(x, y, opts = {}) {
-    const count = Math.max(0, Math.floor(opts.count ?? 12));
+    // Quality lowers the count (never below one particle for a request of one or more).
+    const want = Math.max(0, Math.floor(opts.count ?? 12));
+    const count = want === 0 ? 0 : Math.max(1, Math.floor(want * FX_QUALITY_BURST_SCALE[quality]));
     const shape = SHAPES[opts.shape ?? 'dot'] ?? SHAPE_DOT;
     const speed = opts.speed ?? 240;
     const spread = opts.spread ?? TAU;
@@ -318,6 +340,65 @@ export function createFx(options = {}) {
     vigPeak = clamp(Number(alpha) || 0, 0, 1);
     vigLeft = Math.max(0.01, Number(life) || VIGNETTE_DECAY_S);
     vigDur = vigLeft;
+  }
+
+  // Adaptive quality: 0 full detail, 1 and 2 spawn fewer burst particles. Affects new bursts only.
+  function setQuality(level) {
+    const q = Math.floor(Number(level) || 0);
+    quality = q < 0 ? 0 : q >= FX_QUALITY_BURST_SCALE.length ? FX_QUALITY_BURST_SCALE.length - 1 : q;
+  }
+
+  // A squash-and-pop where an enemy of `kind` died. The angle is the squash axis (the dash direction).
+  // Runs on real time so it shows through hit-stop.
+  function deathPop(kind, x, y, angle = 0) {
+    const p = pops[popHead];
+    popHead = (popHead + 1) % FX_MAX_POPS;
+    p.alive = true;
+    p.kind = String(kind);
+    p.x = x;
+    p.y = y;
+    p.angle = Number(angle) || 0;
+    p.age = 0;
+    p.life = POP_LIFE_S;
+  }
+
+  // Live and recently dead pops. The renderer reads it and skips entries with alive === false.
+  function getPops() {
+    return pops;
+  }
+
+  // Camera kick in a direction (unit vector dx, dy) by `px` pixels, capped at KICK_MAX_PX in total.
+  function kick(dx, dy, px) {
+    const k = Number(px) || 0;
+    if (k <= 0) return;
+    kickX += dx * k;
+    kickY += dy * k;
+    const m = Math.hypot(kickX, kickY);
+    if (m > KICK_MAX_PX) {
+      kickX = (kickX * KICK_MAX_PX) / m;
+      kickY = (kickY * KICK_MAX_PX) / m;
+    }
+  }
+
+  // Camera kick offset in px. Shared object: read it, don't keep it.
+  function getKickOffset() {
+    kickOut.x = kickX;
+    kickOut.y = kickY;
+    return kickOut;
+  }
+
+  // A soft darkening centred on (x, y) that fades over `ms` of real time. Read with getDarken().
+  function darkenAt(x, y, alpha = 0.3, ms = 120) {
+    dark.x = x;
+    dark.y = y;
+    dark.alpha = clamp(Number(alpha) || 0, 0, 1);
+    dark.dur = Math.max(0.02, (Number(ms) || 0) / 1000);
+    dark.life = dark.dur;
+  }
+
+  // The live darkening, or null. Its strength is alpha * (life / dur)^2 at the moment.
+  function getDarken() {
+    return dark.life > 0 ? dark : null;
   }
 
   // Plays a named preset from FX_PRESETS. Returns false for an unknown name.
@@ -452,6 +533,23 @@ export function createFx(options = {}) {
         }
         p.y -= 70 * d * Math.max(0.2, 1 - p.age / p.life);
       }
+    }
+    // Presentation timers run on real time, so they keep going through hit-stop.
+    if (kickX !== 0 || kickY !== 0) {
+      const k = Math.exp(-KICK_DECAY * d);
+      kickX *= k;
+      kickY *= k;
+      if (Math.abs(kickX) < 0.01 && Math.abs(kickY) < 0.01) {
+        kickX = 0;
+        kickY = 0;
+      }
+    }
+    if (dark.life > 0) dark.life = Math.max(0, dark.life - d);
+    for (let i = 0; i < FX_MAX_POPS; i++) {
+      const p = pops[i];
+      if (!p.alive) continue;
+      p.age += d;
+      if (p.age >= p.life) p.alive = false;
     }
     return scale;
   }
@@ -627,6 +725,13 @@ export function createFx(options = {}) {
     preset,
     update,
     getShakeOffset,
+    setQuality,
+    deathPop,
+    getPops,
+    kick,
+    getKickOffset,
+    darkenAt,
+    getDarken,
     drawWorld,
     drawScreen,
     // Live burst particles only. Use stats() for everything.

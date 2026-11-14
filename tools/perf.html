@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Riptide Rush: art benchmark</title>
+  <title>Riptide Rush: frame benchmark</title>
   <style>
     :root { color-scheme: dark; }
     body {
@@ -18,7 +18,7 @@
     p { margin: 4px 0 10px; max-width: 90ch; }
     canvas { display: block; max-width: 100%; height: auto; border-radius: 6px; }
     #out {
-      font: 600 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 600 13px ui-monospace, SFMono-Regular, Menlo, monospace;
       color: #ffe066;
       margin: 8px 0;
       white-space: pre-wrap;
@@ -27,32 +27,40 @@
   </style>
 </head>
 <body>
-  <h1>Riptide Rush: art benchmark</h1>
-  <p>Draws 200 mixed enemies, 60 bullets, the player and the arena background through <code>src/art.js</code>,
-     on a 1920x1080 backing canvas (logical 1280x720, scale 1.5). Each frame ends with a 1x1 <code>getImageData</code>
-     so the time includes the canvas raster, not only the JavaScript. The scene is deterministic (fixed 60 Hz
-     simulation step), so before and after runs draw the same frames. Results go to <code>window.__perf</code>
-     after a 5 s measured run, which follows a 120-frame warm-up that fills the sprite caches.
-     Add <code>?parts=background,enemies,bullets,player</code> to time a subset.</p>
+  <h1>Riptide Rush: frame benchmark</h1>
+  <p>Draws a full game frame through <code>src/render.js</code> (<code>drawFrame</code>): 200 enemies in a mix of
+     kinds, 60 bullets, a player, and a steady heavy-effects load (kill bursts, multi-kill shards, trails, floaters)
+     from <code>src/fx.js</code>, on a 1920x1080 backing canvas. Each frame ends with a 1x1
+     <code>getImageData</code> so the time includes the canvas raster. The scene is deterministic: the same seeds,
+     the same fixed 60 Hz effects step, so before and after runs draw the same frames.
+     Results go to <code>window.__perf</code> after the warm-up. <code>?frames=N</code> sets the measured frame count
+     (default 300); <code>?warm=N</code> sets the warm-up (default 120).</p>
   <div id="out">running...</div>
-  <canvas id="c" width="1920" height="1080" aria-label="Benchmark scene: 200 enemies, 60 bullets, player, background"></canvas>
+  <canvas id="c" width="1920" height="1080" aria-label="Benchmark scene: 200 enemies, 60 bullets, heavy effects"></canvas>
 
 <script type="module">
-  import { draw } from '../src/art.js';
+  import { createGame, spawnEnemy } from '../src/game.js';
+  import { drawFrame } from '../src/render.js';
+  import { createFx, FX_PRESETS } from '../src/fx.js';
+  import { computeLayout, createHud, DEFAULT_SETTINGS } from '../src/hud.js';
 
   const LW = 1280;
   const LH = 720;
-  const SCALE = 1.5;
+  const WIN_W = 1920;
+  const WIN_H = 1080;
   const N_ENEMIES = 200;
   const N_BULLETS = 60;
-  // 120 frames (2 s of simulated time) covers one full cycle of every animation phase, so the lazy caches are warm.
-  const WARMUP_FRAMES = 120;
-  const MEASURE_MS = 5000;
-  const TYPES = ['drifter', 'spitter', 'charger', 'shellback', 'splitter', 'mini', 'mine'];
+  const DT = 1 / 60;
+
+  const params = new URLSearchParams(location.search);
+  const MEASURE_FRAMES = Math.max(10, Number(params.get('frames')) || 300);
+  const WARMUP_FRAMES = Math.max(0, Number(params.get('warm')) || 120);
+  const KINDS = ['drifter', 'spitter', 'charger', 'shellback', 'splitter', 'mine'];
 
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
   const out = document.getElementById('out');
+  const layout = computeLayout(WIN_W, WIN_H);
 
   // Small seeded generator so every run builds the same scene.
   function mulberry32(seed) {
@@ -65,153 +73,180 @@
   }
   const rnd = mulberry32(0xbe7c4);
 
-  const enemies = [];
+  const game = createGame(0xbe7c4);
   for (let i = 0; i < N_ENEMIES; i++) {
-    const ang = rnd() * Math.PI * 2;
-    const sp = 20 + rnd() * 80;
-    enemies.push({
-      type: TYPES[i % TYPES.length],
-      x: 24 + rnd() * (LW - 48),
-      y: 24 + rnd() * (LH - 48),
-      vx: Math.cos(ang) * sp,
-      vy: Math.sin(ang) * sp,
-      a: ang,
-      ph: rnd() * Math.PI * 2,
-    });
+    const kind = KINDS[i % KINDS.length];
+    spawnEnemy(game, kind, 40 + rnd() * (LW - 80), 40 + rnd() * (LH - 80));
   }
-
-  const bullets = [];
+  // Enemies stay where they were put. Their px/py match x/y so interpolation is a no-op.
+  for (const e of game.enemies) {
+    e.px = e.x;
+    e.py = e.y;
+    const ang = rnd() * Math.PI * 2;
+    e.vx = Math.cos(ang) * 30;
+    e.vy = Math.sin(ang) * 30;
+  }
+  game.player.x = LW / 2;
+  game.player.y = LH / 2;
+  game.player.px = game.player.x;
+  game.player.py = game.player.y;
   for (let i = 0; i < N_BULLETS; i++) {
+    const x = 30 + rnd() * (LW - 60);
+    const y = 30 + rnd() * (LH - 60);
     const ang = rnd() * Math.PI * 2;
-    const sp = 160 + rnd() * 120;
-    bullets.push({
-      x: 24 + rnd() * (LW - 48),
-      y: 24 + rnd() * (LH - 48),
+    const sp = 120 + rnd() * 80;
+    game.bullets.push({
+      id: game.nextId++,
+      owner: i % 5 === 0 ? 'player' : 'enemy',
+      x,
+      y,
+      px: x,
+      py: y,
       vx: Math.cos(ang) * sp,
       vy: Math.sin(ang) * sp,
-      reflected: i % 6 === 0,
+      r: 5,
+      life: 10,
+      alive: true,
     });
   }
 
-  let frame = 0;
+  const fx = createFx({ random: mulberry32(7) });
+  // ?quality=N sets the effects quality level (0 full, 2 lowest) before the run; ?nofloat=1 skips floater text.
+  const NO_FLOATERS = params.get('nofloat') === '1';
+  if (params.has('quality')) fx.setQuality?.(Number(params.get('quality')));
+  const hud = createHud();
+  const view = {
+    screen: 'playing',
+    game,
+    alpha: 0.5,
+    time: 0,
+    dt: DT,
+    highScore: 0,
+    newBest: false,
+    overAge: 0,
+    muted: false,
+    fx,
+    rings: [],
+    layout,
+    hud,
+    settings: DEFAULT_SETTINGS,
+    menuRow: 0,
+  };
 
-  function step() {
-    const dt = 1 / 60;
-    for (const e of enemies) {
-      e.x += e.vx * dt;
-      e.y += e.vy * dt;
-      if (e.x < 16 || e.x > LW - 16) e.vx = -e.vx;
-      if (e.y < 16 || e.y > LH - 16) e.vy = -e.vy;
-      e.x = Math.min(LW - 16, Math.max(16, e.x));
-      e.y = Math.min(LH - 16, Math.max(16, e.y));
-      e.a = Math.atan2(e.vy, e.vx);
+  // The particle bursts of a preset, without its side effects. Presets also hold the sim for hit-stop, and
+  // a hit-stop every frame would freeze the particle clock, so the benchmark plays the bursts alone.
+  function burstPreset(name, x, y) {
+    for (const b of FX_PRESETS[name].bursts) fx.burst(x, y, { ...b });
+  }
+
+  // Steady heavy-effects load: a kill burst every frame, a multi-kill every 4 frames, a mine explosion every
+  // 6, trails and floaters, and the kill presentation (death pops, a camera kick and a darkening).
+  function feedEffects(frame) {
+    const x = 40 + rnd() * (LW - 80);
+    const y = 40 + rnd() * (LH - 80);
+    burstPreset('kill', x, y);
+    if (frame % 4 === 0) burstPreset('multiKill', x, y);
+    if (frame % 6 === 0) burstPreset('mineExplode', x, y);
+    if (frame % 3 === 0) fx.trail(x, y, rnd() * Math.PI * 2, { length: 60, width: 22 });
+    if (frame % 15 === 0 && !NO_FLOATERS) fx.floater(x, y, '+' + (100 + frame), { color: '#ffe066' });
+    // Optional calls: older trees (the baseline runs) do not have the kill presentation, so they skip it.
+    if (frame % 4 === 0) fx.deathPop?.('drifter', x, y, 0);
+    // A big multi-kill about every 2 s: a camera kick and a darkening that lasts about 0.2 s.
+    if (frame % 120 === 0) {
+      fx.kick?.(1, 0, 6);
+      fx.darkenAt?.(x, y, 0.4, 190);
     }
-    for (const b of bullets) {
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
-      if (b.x < 0 || b.x > LW) b.vx = -b.vx;
-      if (b.y < 0 || b.y > LH) b.vy = -b.vy;
-      b.x = Math.min(LW, Math.max(0, b.x));
-      b.y = Math.min(LH, Math.max(0, b.y));
-    }
   }
 
-  // Flash and telegraph vary on a fixed schedule, so every frame has the same mix.
-  function enemyState(e, t) {
-    const wind = Math.sin(t * 0.9 + e.ph);
-    const telegraph = wind > 0.75 ? (wind - 0.75) * 4 : 0;
-    const flash = Math.sin(t * 2.3 + e.ph * 1.7) > 0.93 ? 1 : 0;
-    return { flash, telegraph };
+  const samples = [];
+  const sections = {};
+  const timings = {};
+  // Section timing flushes the canvas at each boundary, which changes the cost, so it is opt-in (?sections=1).
+  if (params.get('sections') === '1') view.timings = timings;
+
+  function percentile(sorted, p) {
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
   }
 
-  // ?parts=background,enemies,bullets,player selects what is drawn (default: all). Used to find the cost.
-  const PARTS = new Set(
-    (new URLSearchParams(location.search).get('parts') || 'background,enemies,bullets,player').split(',')
-  );
-
-  function drawFrame() {
-    const t = frame / 60;
-    ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
-    if (PARTS.has('background')) draw.background(ctx, LW, LH, t);
-    if (PARTS.has('enemies')) {
-      for (const e of enemies) {
-        draw.enemy(ctx, e.type, e.x, e.y, e.a, t, enemyState(e, t));
-      }
-    }
-    if (PARTS.has('bullets')) {
-      for (const b of bullets) {
-        draw.bullet(ctx, b.x, b.y, t, { reflected: b.reflected });
-      }
-    }
-    if (PARTS.has('player')) draw.player(ctx, LW / 2, LH / 2, 0.3, t, { charges: 2, dashing: frame % 180 < 30 });
-    // Force the raster to finish so the timing includes it.
-    ctx.getImageData(0, 0, 1, 1);
-  }
-
-  function stats(values) {
-    const sorted = values.slice().sort((a, b) => a - b);
-    const sum = values.reduce((a, b) => a + b, 0);
-    const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
-    return {
-      avg: sum / values.length,
-      median: sorted[Math.floor(sorted.length / 2)],
-      p95,
-      worst: sorted[sorted.length - 1],
-    };
-  }
-
-  const r2 = (v) => Math.round(v * 100) / 100;
-
-  window.__perf = { running: true };
-
-  // Warm-up: the first frames create the sprite and background caches. Time them separately.
-  let firstFrameMs = 0;
-  for (let i = 0; i < WARMUP_FRAMES; i++) {
-    step();
-    const t0 = performance.now();
-    drawFrame();
-    if (i === 0) firstFrameMs = performance.now() - t0;
-    frame++;
-  }
-
-  // Measured run: a synchronous loop for MEASURE_MS. Each iteration times the draw and the raster flush.
-  // It does not wait for requestAnimationFrame, so compositor stalls on a busy machine do not skew it.
-  function measure() {
-    const costs = [];
-    const start = performance.now();
-    while (performance.now() - start < MEASURE_MS) {
-      step();
+  function run() {
+    const total = WARMUP_FRAMES + MEASURE_FRAMES;
+    for (let f = 0; f < total; f++) {
+      feedEffects(f);
+      fx.update(DT);
+      view.time += DT;
+      view.fx = fx;
+      const measuring = f >= WARMUP_FRAMES;
       const t0 = performance.now();
-      drawFrame();
-      costs.push(performance.now() - t0);
-      frame++;
+      for (const k of Object.keys(timings)) delete timings[k];
+      drawFrame(ctx, view);
+      ctx.getImageData(0, 0, 1, 1);
+      const dt = performance.now() - t0;
+      if (measuring) {
+        samples.push(dt);
+        for (const k of Object.keys(timings)) {
+          sections[k] = (sections[k] ?? 0) + timings[k];
+        }
+      }
     }
-    const cost = stats(costs);
-    const seconds = (performance.now() - start) / 1000;
+    const sorted = samples.slice().sort((a, b) => a - b);
+    const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+    const perSection = {};
+    for (const k of Object.keys(sections)) perSection[k] = +(sections[k] / samples.length).toFixed(3);
     const result = {
-      running: false,
-      frames: costs.length,
-      seconds: r2(seconds),
-      avgMs: r2(cost.avg),
-      medianMs: r2(cost.median),
-      p95Ms: r2(cost.p95),
-      worstMs: r2(cost.worst),
-      firstFrameMs: r2(firstFrameMs),
-      enemies: N_ENEMIES,
-      bullets: N_BULLETS,
-      parts: [...PARTS].join(','),
+      label: params.get('label') || 'current',
+      api: { setQuality: typeof fx.setQuality, deathPop: typeof fx.deathPop, kick: typeof fx.kick, darkenAt: typeof fx.darkenAt },
+      quality: params.get('quality'),
+      frames: samples.length,
+      enemies: game.enemies.length,
+      bullets: game.bullets.length,
+      particles: fx.count(),
+      avgMs: +avg.toFixed(3),
+      medianMs: +percentile(sorted, 0.5).toFixed(3),
+      p95Ms: +percentile(sorted, 0.95).toFixed(3),
+      worstMs: +sorted[sorted.length - 1].toFixed(3),
+      sectionAvgMs: perSection,
     };
     window.__perf = result;
-    out.textContent =
-      'draw+raster: avg ' + result.avgMs + ' ms, median ' + result.medianMs + ' ms, p95 ' + result.p95Ms + ' ms, worst ' + result.worstMs + ' ms' +
-      '  |  ' + result.frames + ' frames in ' + result.seconds + ' s' +
-      '\nfirst frame (cache fill): ' + result.firstFrameMs + ' ms' +
-      '  |  ' + N_ENEMIES + ' enemies, ' + N_BULLETS + ' bullets';
-    console.log('__perf', JSON.stringify(result));
+    out.textContent = JSON.stringify(result, null, 2);
   }
 
-  // Start after the first paint so the page is visible while the warm-up runs.
-  setTimeout(measure, 50);
+  // ?shot=1 leaves one frame of a multi-kill on the canvas for a screenshot: three enemies pop at once,
+  // with the camera kick and the darkening, over the 60 bullets and their trails.
+  function shotFrame() {
+    const cx = LW / 2 + 120;
+    const cy = LH / 2 - 60;
+    for (let i = 0; i < 3; i++) {
+      fx.deathPop?.(KINDS[i], cx + i * 46 - 46, cy + (i % 2) * 40, 0);
+    }
+    fx.kick?.(1, 0, 6);
+    fx.darkenAt?.(cx, cy, 0.4, 190);
+    fx.update(0.07);
+    window.__shot = { pops: fx.getPops().filter((p) => p.alive).map((p) => [p.kind, Math.round(p.x), Math.round(p.y), +p.age.toFixed(3)]), darken: !!fx.getDarken() };
+    drawFrame(ctx, view);
+  }
+
+  // ?focus=cx,cy,scale (canvas pixels) zooms the canvas about one point, for close-up screenshots.
+  function focusCanvas() {
+    const [cx, cy, s] = params.get('focus').split(',').map(Number);
+    const st = canvas.style;
+    st.position = 'fixed';
+    st.maxWidth = 'none';
+    st.width = `${1920 * s}px`;
+    st.height = `${1080 * s}px`;
+    st.left = `${-(cx * s) + window.innerWidth / 2}px`;
+    st.top = `${-(cy * s) + window.innerHeight / 2}px`;
+    st.borderRadius = '0';
+    document.body.style.overflow = 'hidden';
+  }
+
+  try {
+    run();
+    if (params.get('shot') === '1') shotFrame();
+    if (params.has('focus')) focusCanvas();
+  } catch (err) {
+    out.textContent = 'error: ' + (err && err.stack ? err.stack : err);
+    window.__perf = { error: String(err) };
+  }
 </script>
 </body>
 </html>
