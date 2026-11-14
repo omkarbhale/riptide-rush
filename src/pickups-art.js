@@ -4,6 +4,8 @@ import { PLAYER, PICKUP, MODIFIER } from './config.js';
 import { PICKUP_KINDS } from './pickups.js';
 
 const FONT = '"Trebuchet MS", "Segoe UI", system-ui, sans-serif';
+// Dark rim around each pickup's solid shape (the deep-sea background colour).
+const PALETTE_RIM = '#0a1020';
 const lerp = (a, b, t) => a + (b - a) * t;
 
 // Each kind has its own silhouette, so pickups read apart at about 20 px.
@@ -52,6 +54,8 @@ const SHAPES = {
   },
   // Frenzy: an upward chevron.
   frenzy(ctx, r) {
+    // Drawn larger than the others: a thin chevron reads smaller than a solid shape at the same radius.
+    r *= 1.3;
     ctx.beginPath();
     ctx.moveTo(0, -r);
     ctx.lineTo(r, r * 0.6);
@@ -84,20 +88,63 @@ export function drawPickups(ctx, game, alpha, t) {
     const color = PICKUP_KINDS[it.kind].color;
     const pulse = 1 + 0.12 * Math.sin(t * 6 + it.id);
     const r = PICKUP.radius * 1.05 * pulse;
+    // Bob: a slow vertical float, out of phase per pickup so a cluster does not move in step.
+    const bob = Math.sin(t * 3.2 + it.id * 1.7) * 1.8;
     ctx.save();
-    ctx.translate(it.x, it.y);
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 16 + 6 * Math.sin(t * 6 + it.id);
+    ctx.translate(it.x, it.y + bob);
+
+    // Glow: three soft discs, additive. Cheaper than shadowBlur on every pickup, and it reads at 20 px.
+    ctx.globalCompositeOperation = 'lighter';
+    const glow = 0.85 + 0.15 * Math.sin(t * 5 + it.id);
     ctx.fillStyle = color;
-    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.1 * glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.18 * glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 1.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.3 * glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 1.25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+
+    // The solid shape, with a dark rim so it separates from the background and from bright bullets.
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    ctx.strokeStyle = PALETTE_RIM;
+    ctx.lineWidth = 1.2;
     SHAPES[it.kind](ctx, r);
+    ctx.stroke();
+
     // A white core makes each pickup read as lit from within.
-    ctx.shadowBlur = 0;
     ctx.globalAlpha = 0.85;
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(0, 0, r * 0.22, 0, Math.PI * 2);
     ctx.fill();
+
+    // Sparkle: two four-point glints that twinkle around the pickup.
+    ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < 2; k++) {
+      const phase = t * 4 + it.id * 2.3 + k * Math.PI;
+      const tw = Math.max(0, Math.sin(phase));
+      if (tw <= 0.05) continue;
+      const a = it.id * 1.9 + k * 2.1 + t * 0.6;
+      const sx = Math.cos(a) * r * 1.6;
+      const sy = Math.sin(a) * r * 1.6;
+      const len = r * (0.35 + 0.45 * tw);
+      ctx.strokeStyle = 'rgba(255, 255, 255, ' + (0.85 * tw).toFixed(3) + ')';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(sx - len, sy);
+      ctx.lineTo(sx + len, sy);
+      ctx.moveTo(sx, sy - len);
+      ctx.lineTo(sx, sy + len);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 

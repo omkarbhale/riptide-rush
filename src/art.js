@@ -204,12 +204,14 @@ function neonBody(ctx, build, color, glow) {
 // (8 levels), rotated to animate the dashes and faded by alpha for the strobe.
 const WARN_LEVELS = 8;
 const WARN_HALF = 30; // sprite covers [-30, 30] local units
-const WARN_RES = 3;
-function warnRingSprite(level) {
-  return cachedLayer('warn:' + level, WARN_HALF * 2 * WARN_RES, WARN_HALF * 2 * WARN_RES, (g) => {
+// The ring is baked at the device resolution of the enemy it sits on (`res`), not a fixed 3x, which
+// was downsampled on every draw at typical device scales.
+function warnRingSprite(level, res) {
+  const px = Math.ceil(WARN_HALF * 2 * res);
+  return cachedLayer('warn:' + level + ':' + res, px, px, (g) => {
     const tg = level / WARN_LEVELS;
     const r = R * (2.0 - 0.7 * tg);
-    g.setTransform(WARN_RES, 0, 0, WARN_RES, WARN_HALF * WARN_RES, WARN_HALF * WARN_RES);
+    g.setTransform(res, 0, 0, res, px / 2, px / 2);
     g.setLineDash([3, 4]);
     g.beginPath();
     g.arc(0, 0, r, 0, TAU);
@@ -238,7 +240,7 @@ function warnRing(ctx, t, tg, size) {
     return;
   }
   const r = R * (2.0 - 0.7 * (level / WARN_LEVELS));
-  const sprite = warnRingSprite(level);
+  const sprite = warnRingSprite(level, curRes);
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   if (sprite) {
@@ -572,8 +574,10 @@ const SPRITE_MAX_RES = 4;
 const FLASH_LEVELS = 2; // flash 0, 0.5, 1
 const TELE_LEVELS = 4; // telegraph 0, 0.25, ... 1
 
+// Sprite resolution in pixels per local unit, rounded up to half steps. Whole steps oversampled by up to
+// 2x at fractional device scales (1.5x was 2x), and every blit then downsampled the extra pixels.
 function spriteRes(v) {
-  return Math.min(SPRITE_MAX_RES, Math.max(1, Math.ceil(v - 1e-6)));
+  return Math.min(SPRITE_MAX_RES, Math.max(0.5, Math.ceil(v * 2 - 1e-6) / 2));
 }
 
 // Drifter tendrils are baked for this many phases of their sin(4t) wobble.

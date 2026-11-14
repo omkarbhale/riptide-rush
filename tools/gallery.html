@@ -35,7 +35,6 @@
       cursor: pointer;
     }
     #vision button[aria-pressed="true"] { color: #050a18; background: #3cf2ff; border-color: #3cf2ff; }
-    .vision-off { filter: none; }
   </style>
 </head>
 <body>
@@ -63,7 +62,7 @@
     <button type="button" data-vision="prot" aria-pressed="false">Protanopia</button>
   </div>
 
-  <canvas id="gallery" width="1960" height="1960" aria-label="Art gallery: background, player, enemies, hazards, the warden, bullets and pulse"></canvas>
+  <canvas id="gallery" width="1960" height="2080" aria-label="Art gallery: background, player, enemies, hazards, the warden, bullets and pulse"></canvas>
 
   <h2>Stress: 200 mixed enemies</h2>
   <div id="readout">FPS --</div>
@@ -71,6 +70,8 @@
 
 <script type="module">
   import { PALETTE, draw } from '../src/art.js';
+  import { drawPickups } from '../src/pickups-art.js';
+  import { PICKUP_KINDS } from '../src/pickups.js';
 
   const TAU = Math.PI * 2;
   const TYPES = [
@@ -95,7 +96,7 @@
 
   // ---- gallery canvas -------------------------------------------------------
   const GW = 1960;
-  const GH = 1960;
+  const GH = 2080;
   const gal = document.getElementById('gallery');
   const g = gal.getContext('2d');
 
@@ -268,6 +269,17 @@
       cell(4 + i * 324, 1746, 316, 200, t, (c, w, h) => {
         draw.enemy(c, 'warden', w / 2, h / 2 + 4, 0.2, t, { ...opts, scale: 0.9 });
         label(c, name, 6, h - 8, '#8fb4d9', 11);
+      });
+    });
+
+    // 8. Pickups at 1x (about 20 px across), each on the arena background, with a bullet for scale.
+    label(g, 'PICKUPS at 1x (about 20 px across: glow, sparkle and bob; the bullet is for scale)', 4, 1972, '#5dff9b');
+    Object.keys(PICKUP_KINDS).forEach((kind, i) => {
+      cell(4 + i * 196, 1982, 190, 90, t, (c, w, h) => {
+        const fake = { pickups: { items: [{ id: i + 1, kind, x: w / 2 - 22, y: h / 2, age: 0 }], fx: [] }, modifiers: {} };
+        drawPickups(c, fake, 1, t);
+        draw.bullet(c, w / 2 + 22, h / 2, t, {});
+        label(c, kind, 6, h - 8, '#8fb4d9', 11);
       });
     });
   }
