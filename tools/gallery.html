@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Riptide Rush: art gallery</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #050a18;
+      color: #9fc3e6;
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    h1 { margin: 0 0 4px; font-size: 18px; color: #3cf2ff; font-weight: 600; }
+    h2 { margin: 28px 0 6px; font-size: 15px; color: #3cf2ff; font-weight: 600; }
+    p { margin: 4px 0 10px; max-width: 90ch; }
+    canvas { display: block; max-width: 100%; height: auto; border-radius: 6px; }
+    #readout {
+      font: 600 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #ffe066;
+      margin: 4px 0 8px;
+    }
+    code { color: #ffb347; }
+  </style>
+</head>
+<body>
+  <h1>Riptide Rush: art gallery</h1>
+  <p>Every sprite is procedural Canvas 2D (<code>src/art.js</code>). Rows are the three states each enemy must read in:
+     normal, hit flash, and telegraph. The 1x row is gameplay scale; the 3x row is for silhouette checks.</p>
+
+  <canvas id="gallery" width="1280" height="1400" aria-label="Art gallery: background, player, enemies, bullets and pulse"></canvas>
+
+  <h2>Stress: 200 mixed enemies</h2>
+  <div id="readout">FPS --</div>
+  <canvas id="stress" width="1280" height="720" aria-label="Stress view: 200 mixed enemies with FPS readout"></canvas>
+
+<script type="module">
+  import { PALETTE, draw } from '../src/art.js';
+
+  const TAU = Math.PI * 2;
+  const TYPES = ['drifter', 'spitter', 'charger', 'shellback', 'splitter', 'mini', 'mine'];
+
+  // ---- gallery canvas -------------------------------------------------------
+  const GW = 1280;
+  const GH = 1400;
+  const gal = document.getElementById('gallery');
+  const g = gal.getContext('2d');
+
+  function label(c, text, x, y, color = '#8fb4d9', size = 12) {
+    c.font = size + 'px ui-monospace, SFMono-Regular, Menlo, monospace';
+    c.fillStyle = color;
+    c.textAlign = 'left';
+    c.textBaseline = 'alphabetic';
+    c.fillText(text, x, y);
+  }
+
+  function labelCentre(c, text, x, y, color = '#8fb4d9') {
+    c.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+    c.fillStyle = color;
+    c.textAlign = 'center';
+    c.textBaseline = 'alphabetic';
+    c.fillText(text, x, y);
+  }
+
+  // Each cell is a clipped background with its own sprite on top.
+  function cell(x, y, w, h, t, paint) {
+    g.save();
+    g.beginPath();
+    g.rect(x, y, w, h);
+    g.clip();
+    g.translate(x, y);
+    draw.background(g, w, h, t);
+    paint(g, w, h);
+    g.restore();
+    g.strokeStyle = 'rgba(60,242,255,0.18)';
+    g.lineWidth = 1;
+    g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  }
+
+  const VARIANTS = [
+    ['normal', {}],
+    ['hit flash', { flash: 1 }],
+    ['telegraph', { telegraph: 0.85 }],
+  ];
+
+  function drawGallery(t) {
+    g.save();
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.fillStyle = PALETTE.deepTop;
+    g.fillRect(0, 0, GW, GH);
+
+    // 1. Background strip
+    labelCentre(g, 'arena background (gradient, vignette, border glow, current lines, motes)', GW / 2, 26, '#8fb4d9');
+    cell(0, 36, GW, 170, t, () => {});
+
+    // 2. Player states
+    label(g, 'PLAYER: Rip, facing right unless noted', 4, 236, '#3cf2ff');
+    const playerStates = [
+      ['idle, 3 charges', { charges: 3 }, 0],
+      ['idle, 1 charge', { charges: 1 }, 0],
+      ['idle, 0 charges', { charges: 0 }, 0],
+      ['dash (stretched, white-hot)', { dashing: true, charges: 3 }, 0],
+      ['invulnerable (flicker)', { invulnerable: true, charges: 2 }, 0],
+      ['facing up-left', { charges: 3 }, -2.4],
+    ];
+    playerStates.forEach(([name, opts, angle], i) => {
+      const x = 4 + i * 212;
+      cell(x, 246, 204, 130, t, (c, w, h) => {
+        draw.player(c, w / 2, h / 2, angle, t, opts);
+        label(c, name, 6, h - 8, '#8fb4d9', 11);
+      });
+    });
+
+    // 3. Enemies at 1x and 3x
+    label(g, 'ENEMIES at gameplay scale (1x, roughly 28 px)', 4, 406, '#ff9a4a');
+    TYPES.forEach((type, i) => labelCentre(g, type, 150 + i * 150 + 73, 424, '#dbe9ff'));
+    VARIANTS.forEach(([name, opts], row) => {
+      const y = 432 + row * 86;
+      label(g, name, 6, y + 46, '#8fb4d9');
+      TYPES.forEach((type, i) => {
+        cell(150 + i * 150, y, 146, 84, t, (c, w, h) => {
+          draw.enemy(c, type, w / 2, h / 2, 0.35, t, opts);
+        });
+      });
+    });
+
+    label(g, 'ENEMIES at 3x (silhouette check)', 4, 716, '#ff9a4a');
+    TYPES.forEach((type, i) => labelCentre(g, type, 150 + i * 150 + 73, 734, '#dbe9ff'));
+    VARIANTS.forEach(([name, opts], row) => {
+      const y = 742 + row * 150;
+      label(g, name, 6, y + 80, '#8fb4d9');
+      TYPES.forEach((type, i) => {
+        cell(150 + i * 150, y, 146, 146, t, (c, w, h) => {
+          draw.enemy(c, type, w / 2, h / 2, 0.35, t, { ...opts, scale: 3 });
+        });
+      });
+    });
+
+    // 4. Bullets and pulse
+    label(g, 'BULLETS and PULSE', 4, 1222, '#ffb347');
+    cell(4, 1232, 248, 150, t, (c, w, h) => {
+      draw.bullet(c, w / 2, h / 2, t, {});
+      label(c, 'bullet 1x', 6, h - 8, '#8fb4d9', 11);
+    });
+    cell(260, 1232, 248, 150, t, (c, w, h) => {
+      draw.bullet(c, w / 2, h / 2, t, { reflected: true });
+      label(c, 'reflected 1x (perfect pulse)', 6, h - 8, '#8fb4d9', 11);
+    });
+    cell(516, 1232, 248, 150, t, (c, w, h) => {
+      draw.bullet(c, w / 2, h / 2, t, { scale: 3 });
+      label(c, 'bullet 3x', 6, h - 8, '#8fb4d9', 11);
+    });
+    cell(772, 1232, 248, 150, t, (c, w, h) => {
+      draw.bullet(c, w / 2, h / 2, t, { scale: 3, reflected: true });
+      label(c, 'reflected 3x', 6, h - 8, '#8fb4d9', 11);
+    });
+    cell(1028, 1232, 248, 150, t, (c, w, h) => {
+      const r = (t * 60) % 110;
+      draw.pulse(c, w / 2, h / 2, r, 1 - r / 130);
+      draw.bullet(c, w / 2, h / 2, t, { reflected: true });
+      label(c, 'pulse ring (looping)', 6, h - 8, '#8fb4d9', 11);
+    });
+    g.restore();
+  }
+
+  // ---- stress view ----------------------------------------------------------
+  const SW = 1280;
+  const SH = 720;
+  const N = 200;
+  const stress = document.getElementById('stress');
+  const S = stress.getContext('2d');
+  const readout = document.getElementById('readout');
+
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const ents = [];
+  for (let i = 0; i < N; i++) {
+    const sp = rnd(30, 120);
+    const ang = rnd(0, TAU);
+    ents.push({
+      type: TYPES[i % TYPES.length],
+      x: rnd(20, SW - 20),
+      y: rnd(20, SH - 20),
+      vx: Math.cos(ang) * sp,
+      vy: Math.sin(ang) * sp,
+      a: ang,
+      f: 0,
+      tg: 0,
+      ph: rnd(0, TAU),
+    });
+  }
+
+  function step(dt, t) {
+    for (const e of ents) {
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
+      if (e.x < 16) { e.x = 16; e.vx = Math.abs(e.vx); }
+      if (e.x > SW - 16) { e.x = SW - 16; e.vx = -Math.abs(e.vx); }
+      if (e.y < 16) { e.y = 16; e.vy = Math.abs(e.vy); }
+      if (e.y > SH - 16) { e.y = SH - 16; e.vy = -Math.abs(e.vy); }
+      e.a = Math.atan2(e.vy, e.vx);
+      e.f = Math.max(0, e.f - dt * 4);
+      if (Math.random() < dt * 0.25) e.f = 1;
+      const wind = Math.sin(t * 0.9 + e.ph);
+      e.tg = wind > 0.75 ? (wind - 0.75) * 4 : 0;
+    }
+  }
+
+  // Returns milliseconds spent in art calls for one frame.
+  function drawStress(t) {
+    const t0 = performance.now();
+    draw.background(S, SW, SH, t);
+    for (const e of ents) {
+      draw.enemy(S, e.type, e.x, e.y, e.a, t, { flash: e.f, telegraph: e.tg });
+    }
+    return performance.now() - t0;
+  }
+
+  // Headless benchmark: draw cost with no rAF throttling, measured once on load.
+  let benchText = 'bench: running';
+  function runBench(frames = 120) {
+    let total = 0;
+    let t = 0;
+    for (let i = 0; i < frames; i++) {
+      t += 1 / 60;
+      step(1 / 60, t);
+      total += drawStress(t);
+    }
+    const avg = total / frames;
+    return { avg, ceiling: 1000 / avg };
+  }
+
+  // ---- loop -----------------------------------------------------------------
+  let last = performance.now();
+  let fpsEma = 60;
+  let msEma = 0;
+  let readoutAt = 0;
+  let simT = 0;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+
+    drawGallery(t);
+
+    simT += dt;
+    step(dt, simT);
+    const ms = drawStress(simT);
+    msEma = msEma === 0 ? ms : msEma * 0.9 + ms * 0.1;
+    if (dt > 0) fpsEma = fpsEma * 0.9 + (1 / dt) * 0.1;
+
+    if (now - readoutAt > 250) {
+      readoutAt = now;
+      readout.textContent =
+        'FPS ' + fpsEma.toFixed(1) +
+        '  |  art draw ' + msEma.toFixed(2) + ' ms/frame  |  ' + N + ' enemies  |  ' + benchText;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  setTimeout(() => {
+    const b = runBench();
+    benchText = 'bench draw ' + b.avg.toFixed(2) + ' ms/frame (ceiling ~' + Math.round(b.ceiling) + ' fps)';
+    window.__artBench = b;
+  }, 300);
+
+  requestAnimationFrame(frame);
+</script>
+</body>
+</html>
