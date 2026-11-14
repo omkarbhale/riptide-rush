@@ -1,39 +1,57 @@
 // Boot, fixed-timestep loop, screen state machine, and the wiring between the sim, the effects layer,
-// the sound layer and the renderer. Sim events go to feedback.js; this file only handles state changes.
-import {
-  LOGICAL_WIDTH as W,
-  LOGICAL_HEIGHT as H,
-  SIM_DT,
-  MAX_FRAME_DT,
-  HIGH_SCORE_KEY,
-  RESTART_GATE,
-} from './config.js';
+// the sound layer and the renderer. Sim events go to feedback.js and hud.js; this file only handles state
+// changes, input routing and the saved options.
+import { SIM_DT, MAX_FRAME_DT, HIGH_SCORE_KEY, RESTART_GATE } from './config.js';
 import { createGame, update, drainEvents } from './game.js';
 import { createInput } from './input.js';
 import { drawFrame } from './render.js';
 import { createFx } from './fx.js';
 import { audio } from './audio.js';
 import { createFeedback } from './feedback.js';
-
-const MUTE_KEY = 'riptide-rush.muted';
+import {
+  OPTION_ROWS,
+  activateSetting,
+  computeLayout,
+  createHud,
+  hudEvents,
+  hudUpdate,
+  loadSettings,
+  pauseHit,
+  saveSettings,
+  setVolume,
+  stepSetting,
+  trackFraction,
+} from './hud.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const input = createInput(canvas);
-const fx = createFx();
-const feedback = createFeedback({ audio, fx });
+
+// Saved options (volume, mute, screen shake, reduced flashes). Blocked storage gives the defaults.
+function storage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 // screen: 'title' | 'playing' | 'paused' | 'over'
 const app = {
   screen: 'title',
   game: createGame(newSeed()),
+  hud: createHud(),
   highScore: loadHighScore(),
   newBest: false,
   overAge: 0,
-  muted: loadMuted(),
+  settings: loadSettings(storage()),
+  menuRow: 0, // the option under the keyboard cursor on the pause screen
+  layout: computeLayout(window.innerWidth, window.innerHeight),
   time: 0,
   acc: 0,
 };
+const input = createInput(canvas, { mapPoint, claimPointer });
+const fx = createFx();
+const feedback = createFeedback({ audio, fx });
 
 function newSeed() {
   return (Math.floor(Math.random() * 0x7fffffff) ^ Date.now()) >>> 0;
@@ -56,33 +74,23 @@ function saveHighScore(value) {
   }
 }
 
-function loadMuted() {
-  try {
-    return window.localStorage.getItem(MUTE_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function saveMuted(value) {
-  try {
-    window.localStorage.setItem(MUTE_KEY, value ? '1' : '0');
-  } catch {
-    // mute lasts for this page only
-  }
-}
-
 // Audio is created on the first user gesture (browsers refuse an AudioContext before one).
-// Until then audio calls are silent no-ops, so the mute state is applied again once it exists.
-function setMuted(value) {
-  app.muted = value;
-  saveMuted(value);
-  audio.setMuted(value);
+// Until then audio calls are silent no-ops, so the saved volume and mute are applied again once it exists.
+function applyAudioSettings() {
+  audio.setMasterVolume(app.settings.volume);
+  audio.setMuted(app.settings.muted);
+}
+
+// Every option change goes through here: it applies the change, then saves it.
+function changeSettings(next) {
+  app.settings = next;
+  saveSettings(storage(), next);
+  applyAudioSettings();
 }
 
 function unlockAudio() {
   if (!audio.init()) return;
-  audio.setMuted(app.muted);
+  applyAudioSettings();
   window.removeEventListener('pointerdown', unlockAudio, true);
   window.removeEventListener('keydown', unlockAudio, true);
 }
@@ -90,11 +98,40 @@ window.addEventListener('pointerdown', unlockAudio, true);
 window.addEventListener('keydown', unlockAudio, true);
 
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'KeyM' && !e.repeat) setMuted(!app.muted);
+  if (e.code === 'KeyM' && !e.repeat) changeSettings({ ...app.settings, muted: !app.settings.muted });
 });
+
+// ---- pointer mapping ------------------------------------------------------------------------------
+// The canvas covers the window; the arena sits inside it letterboxed. Input maps a click to arena space.
+function cssPoint(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  return { x: clientX - r.left, y: clientY - r.top };
+}
+
+function mapPoint(clientX, clientY) {
+  const p = cssPoint(clientX, clientY);
+  const L = app.layout;
+  return { x: (p.x - L.px) / L.s, y: (p.y - L.py) / L.s };
+}
+
+// A left click inside the pause options panel is handled here and never resumes the game. A click
+// outside the panel is not claimed, so it resumes as before.
+function claimPointer(button, clientX, clientY) {
+  if (app.screen !== 'paused' || button !== 0) return false;
+  const p = cssPoint(clientX, clientY);
+  const hit = pauseHit(app.layout, p.x, p.y);
+  if (!hit) return false;
+  if (hit.row !== null) {
+    app.menuRow = hit.row;
+    if (hit.part === 'track') changeSettings(setVolume(app.settings, trackFraction(app.layout, p.x)));
+    else changeSettings(activateSetting(app.settings, OPTION_ROWS[hit.row]));
+  }
+  return true;
+}
 
 function startRun() {
   app.game = createGame(newSeed());
+  app.hud = createHud();
   app.screen = 'playing';
   app.newBest = false;
   app.overAge = 0;
@@ -106,6 +143,7 @@ function startRun() {
 function pause() {
   if (app.screen !== 'playing') return;
   app.screen = 'paused';
+  app.menuRow = 0;
   input.reset();
   feedback.setPaused(true);
 }
@@ -130,7 +168,7 @@ function endRun(score) {
 function handleAction(action) {
   switch (app.screen) {
     case 'title':
-      if (action === 'confirm') startRun();
+      if (action === 'confirm' || action === 'select') startRun();
       break;
     case 'playing':
       if (action === 'pause') pause();
@@ -138,9 +176,14 @@ function handleAction(action) {
       break;
     case 'paused':
       if (action === 'pause' || action === 'confirm') resume();
+      else if (action === 'up') app.menuRow = (app.menuRow + OPTION_ROWS.length - 1) % OPTION_ROWS.length;
+      else if (action === 'down') app.menuRow = (app.menuRow + 1) % OPTION_ROWS.length;
+      else if (action === 'left' || action === 'right') {
+        changeSettings(stepSetting(app.settings, OPTION_ROWS[app.menuRow], action === 'left' ? -1 : 1));
+      } else if (action === 'select') changeSettings(activateSetting(app.settings, OPTION_ROWS[app.menuRow]));
       break;
     case 'over':
-      if (action === 'confirm' && app.overAge >= RESTART_GATE) startRun();
+      if ((action === 'confirm' || action === 'select') && app.overAge >= RESTART_GATE) startRun();
       break;
     default:
       break;
@@ -167,6 +210,7 @@ function simStep() {
     else if (ev.type === 'pulse') input.consume('pulse');
     else if (ev.type === 'gameOver') endRun(ev.score);
   }
+  hudEvents(app.hud, events, app.game);
   feedback.handleStep(events, app.game);
 }
 
@@ -195,6 +239,7 @@ function frame(now) {
     pumpInput(dt);
   }
   feedback.frame(live ? dt : 0, app.game);
+  hudUpdate(app.hud, dt, app.screen === 'title' ? null : app.game, app.layout);
 
   drawFrame(ctx, {
     screen: app.screen,
@@ -205,19 +250,24 @@ function frame(now) {
     highScore: app.highScore,
     newBest: app.newBest,
     overAge: app.overAge,
-    muted: app.muted,
+    muted: app.settings.muted,
     fx,
     rings: feedback.rings,
+    layout: app.layout,
+    hud: app.hud,
+    settings: app.settings,
+    menuRow: app.menuRow,
   });
   requestAnimationFrame(frame);
 }
 
-// Letterbox: the canvas keeps 16:9 and fits the window; the backing store is sized for devicePixelRatio.
+// The canvas covers the whole window. The arena keeps its 16:9 shape inside it (see hud.js computeLayout),
+// and the backing store is sized for devicePixelRatio.
 function fit() {
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
-  const cssW = Math.max(1, Math.floor(W * scale));
-  const cssH = Math.max(1, Math.floor(H * scale));
+  const cssW = Math.max(1, window.innerWidth);
+  const cssH = Math.max(1, window.innerHeight);
+  app.layout = computeLayout(cssW, cssH);
   canvas.style.width = `${cssW}px`;
   canvas.style.height = `${cssH}px`;
   canvas.width = Math.round(cssW * dpr);

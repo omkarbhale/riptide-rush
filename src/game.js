@@ -130,7 +130,7 @@ export function tierFor(count) {
 // Behaviour table. Each kind: radius, points, init(e, game), think(e, game, dt), and optional:
 //   onStagger(e, game)   called when a Pulse staggers it
 //   staggerTime          seconds of stagger (default PULSE.stagger)
-//   staggerable: false   Pulse has no effect (mines)
+//   staggerable: false   Pulse has no effect: no stagger and no reflect kill (mines)
 //   dashHit(game, e, d, x, y) -> 'kill' | 'deflect' | 'ignore'   (default 'kill')
 //   onDeath(game, e)     runs when the enemy leaves play by any cause that kills it
 //   dieOnContact         a contact hit that lands also removes the enemy (no score)
@@ -199,6 +199,7 @@ export const ENEMY_KINDS = {
           e.dirX = ux;
           e.dirY = uy;
           e.telegraph = 0;
+          game.events.push({ type: 'spitWindup', x: e.x, y: e.y, enemyType: 'spitter' }); // audible before the shot lands
         }
       }
     },
@@ -237,6 +238,7 @@ export const ENEMY_KINDS = {
           e.dirY = uy;
           e.vx = 0;
           e.vy = 0;
+          game.events.push({ type: 'chargerTelegraph', x: e.x, y: e.y });
         }
       } else if (e.state === 'telegraph') {
         e.vx = 0;
@@ -247,6 +249,7 @@ export const ENEMY_KINDS = {
           e.stateT = c.lungeTime;
           e.vx = e.dirX * c.lungeSpeed;
           e.vy = e.dirY * c.lungeSpeed;
+          game.events.push({ type: 'chargerLunge', x: e.x, y: e.y });
         }
       } else {
         // lunge: straight line until time runs out or it hits the arena wall
@@ -828,7 +831,8 @@ function firePulse(game) {
   if (perfect) {
     p.pulseCooldown = 0;
     game.slowmo = PULSE.slowmoDuration;
-    game.events.push({ type: 'perfectPulse', x: p.x, y: p.y });
+    game.score += PULSE.perfectBonus; // #78: the floater's +N is this award
+    game.events.push({ type: 'perfectPulse', x: p.x, y: p.y, points: PULSE.perfectBonus });
   }
 }
 
@@ -987,7 +991,8 @@ function reflectedBulletsHitEnemies(game) {
   for (const b of game.bullets) {
     if (!b.alive || b.owner !== 'player') continue;
     for (const e of game.enemies) {
-      if (!e.alive) continue;
+      // #81: Pulse has no effect on a kind marked staggerable: false (mines), so a reflected bullet passes them.
+      if (!e.alive || ENEMY_KINDS[e.kind].staggerable === false) continue;
       if (segmentHitsCircle(b.px, b.py, b.x, b.y, e.x, e.y, e.r + b.r)) {
         b.alive = false;
         game.burstKills += killEnemy(game, e, game.burstKills + 1, 'reflect');
